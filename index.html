@@ -3629,6 +3629,7 @@ function normalizeData(){
   });
   if(!data.profile) data.profile = { heightCm:null, weightLog:[] };
   if(data.profile.age===undefined) data.profile.age = null;
+  if(data.profile.birthDate===undefined) data.profile.birthDate = null;
   if(data.profile.sex===undefined) data.profile.sex = null;
   if(data.profile.activityLevel===undefined) data.profile.activityLevel = null;
   if(data.profile.metabolism===undefined) data.profile.metabolism = 'normal';
@@ -6429,10 +6430,20 @@ function renderMacroPlate(nutri){
   });
 }
 
+function ageFromBirthDate(iso){
+  if(!iso) return null;
+  const bd = new Date(iso+"T12:00:00");
+  if(isNaN(bd.getTime())) return null;
+  const today = new Date();
+  let age = today.getFullYear() - bd.getFullYear();
+  const hadBirthdayThisYear = (today.getMonth() > bd.getMonth()) || (today.getMonth()===bd.getMonth() && today.getDate() >= bd.getDate());
+  if(!hadBirthdayThisYear) age--;
+  return age >= 0 ? age : null;
+}
 function computeNutrition(){
   const w = latestWeight();
   const h = data.profile.heightCm;
-  const age = data.profile.age;
+  const age = ageFromBirthDate(data.profile.birthDate) != null ? ageFromBirthDate(data.profile.birthDate) : data.profile.age;
   const sex = data.profile.sex;
   const activity = ACTIVITY_LEVELS.find(a=>a.key===data.profile.activityLevel);
   const goal = data.profile.goal;
