@@ -934,11 +934,11 @@
       <button class="del-btn" style="font-size:20px;" onclick="closeLibraryModal()">✕</button>
     </div>
     <input type="text" id="librarySearchInput" placeholder="Rechercher un exercice..." autocomplete="off" style="margin-top:10px;">
+    <button class="btn btn-add" style="width:100%; margin-top:8px;" onclick="closeLibraryModal(); openAddModal();">+ Créer un exercice personnalisé</button>
     <div id="libraryResults" style="margin-top:10px;"></div>
     <div id="libraryAddSelectionBar" style="display:none; margin-top:8px;">
       <button class="btn btn-add" style="width:100%;" onclick="confirmLibrarySelection()">Ajouter la sélection (<span id="libraryCheckedCount">0</span>)</button>
     </div>
-    <button class="btn btn-add" style="width:100%; margin-top:8px;" onclick="closeLibraryModal(); openAddModal();">+ Créer un exercice personnalisé</button>
   </div>
 </div>
 
@@ -3707,8 +3707,7 @@ function getOrCreateSessionForDate(iso){
   return s;
 }
 function getOrCreateTodaySession(){
-  if(!viewingDateISO) viewingDateISO = todayISO();
-  return getOrCreateSessionForDate(viewingDateISO);
+  return getOrCreateSessionForDate(todayISO());
 }
 function setViewingDate(iso){
   viewingDateISO = iso;
@@ -3745,6 +3744,27 @@ function dayScrollerHtml(){
   }
   html += '</div></div>';
   return html;
+}
+function dayHistoryCardHtml(iso){
+  const session = data.sessions.find(s=>s.date===iso);
+  const d = new Date(iso+"T12:00:00");
+  const dateLabel = d.toLocaleDateString('fr-FR', {weekday:'long', day:'numeric', month:'long'});
+  if(!session || Object.keys(session.entries||{}).length===0){
+    return '<div class="card" style="padding:16px;"><h2 class="section-title" style="margin-bottom:6px;">📅 ' + escapeHtml(dateLabel) + '</h2>'
+      + '<div style="color:var(--text-faint); font-size:13px;">Aucune séance ce jour-là.</div></div>';
+  }
+  const exoIds = (session.activeExercises && session.activeExercises.length) ? session.activeExercises : Object.keys(session.entries);
+  let body = '';
+  exoIds.forEach(exoId=>{
+    const exo = data.exercises.find(e=>e.id===exoId);
+    const sets = session.entries[exoId];
+    if(!exo || !sets || !sets.length) return;
+    body += '<div style="margin-bottom:10px;"><div style="font-weight:600; font-size:14px; margin-bottom:4px;">' + escapeHtml(exo.name) + '</div>'
+      + '<div style="font-size:13px; color:var(--text-dim); line-height:1.6;">'
+      + sets.map(s=> isCardioExo(exo) ? formatCardioSet(exo,s) : (s.weight + ' kg × ' + s.reps + ' reps' + (s.warmup ? ' 🔥' : ''))).join(', ')
+      + '</div></div>';
+  });
+  return '<div class="card" style="padding:16px;"><h2 class="section-title" style="margin-bottom:10px;">📅 ' + escapeHtml(session.customName || dateLabel) + '</h2>' + body + '</div>';
 }
 function openDatePicker(){
   const inp = document.getElementById('hiddenDateJumpInput');
@@ -4419,18 +4439,16 @@ function renderSeance(){
   const todaysExercises = session.activeExercises.map(id=>data.exercises.find(e=>e.id===id)).filter(Boolean);
 
   let html = dayScrollerHtml() + timerHtml + summaryHtml + dailyTipHtml();
-  const isViewingToday = viewingDateISO===todayISO();
-  if(isViewingToday) html += readinessCardHtml();
-  const yearAgoMsg = isViewingToday ? getOneYearAgoInsight() : null;
+  const yearAgoMsg = getOneYearAgoInsight();
   if(yearAgoMsg){
     html += '<div class="card" style="padding:12px 16px;"><div class="insight" style="margin-top:0;">' + yearAgoMsg + '</div></div>';
   }
-  const loadAdvice = isViewingToday ? computeWeeklyLoadAdvice() : null;
+  const loadAdvice = computeWeeklyLoadAdvice();
   if(loadAdvice){
     html += '<div class="card" style="padding:12px 16px; border-left:3px solid ' + (loadAdvice.type==='light' ? 'var(--green)' : 'var(--gold)') + ';"><div class="insight" style="margin-top:0;">' + loadAdvice.text + '</div></div>';
   }
   const plateauDismissedAt = parseInt(localStorage.getItem('ethrniity-plateau-dismissed-' + ACTIVE_PROFILE_ID)) || 0;
-  const plateauAlerts = (isViewingToday && (Date.now() - plateauDismissedAt > 7*86400000)) ? computePlateauAlerts() : [];
+  const plateauAlerts = (Date.now() - plateauDismissedAt > 7*86400000) ? computePlateauAlerts() : [];
   if(plateauAlerts.length){
     const shown = plateauAlerts.slice(0,2);
     html += '<div class="card" id="plateauAlertCard" style="padding:12px 16px; border-left:3px solid var(--gold); display:flex; justify-content:space-between; align-items:flex-start; gap:10px;">'
@@ -4497,7 +4515,7 @@ function renderSeance(){
         + '<button class="edit-btn" onclick="event.stopPropagation(); openExerciseComparisonModal(\'' + exo.id + '\')">🏆 Ligue</button>'
         + '<button class="edit-btn" onclick="event.stopPropagation(); viewProgressionFor(\'' + exo.id + '\')">📈 Progression</button>'
         + '<button class="edit-btn" onclick="event.stopPropagation(); openEditModal(\'' + exo.id + '\')">✎ Modifier</button>'
-        + '<button class="edit-btn" onclick="event.stopPropagation(); removeFromTodaySession(\'' + session.id + '\',\'' + exo.id + '\')">✕ Retirer</button>'
+        + '<button class="edit-btn" onclick="event.stopPropagation(); removeFromTodaySession(\'' + session.id + '\',\'' + exo.id + '\')" title="Retirer de la séance">🗑</button>'
         + '</div>'
         + (function(){
             const target = (session.targetSets && session.targetSets[exo.id]) || 0;
@@ -4520,6 +4538,8 @@ function renderSeance(){
               + '<span>' + label + '</span>'
               + (s.warmup ? '<span class="tag" style="background:var(--gold-22, rgba(232,212,138,0.15)); color:var(--gold);">🔥 échauffement</span>' : '')
               + (isPR ? '<span class="pr-badge">PR</span>' : '')
+              + '<button class="edit-btn" style="padding:4px 6px;" ' + (i===0 ? 'disabled' : '') + ' onclick="moveSet(\'' + session.id + '\',\'' + exo.id + '\',' + i + ',-1)" title="Monter">↑</button>'
+              + '<button class="edit-btn" style="padding:4px 6px;" ' + (i===sets.length-1 ? 'disabled' : '') + ' onclick="moveSet(\'' + session.id + '\',\'' + exo.id + '\',' + i + ',1)" title="Descendre">↓</button>'
               + '<button class="edit-btn" style="padding:4px 6px;" onclick="editSet(\'' + session.id + '\',\'' + exo.id + '\',' + i + ')">✎</button>'
               + '<button class="del-btn" style="margin-left:0;" onclick="deleteSet(\'' + session.id + '\',\'' + exo.id + '\',' + i + ')">✕</button></div>';
           }).join('') : '<div style="color:var(--text-faint); font-size:13px; padding:6px 0;">Aucune série pour l\u2019instant</div>')
@@ -4554,6 +4574,8 @@ function renderSeance(){
     });
   }
 
+  html += readinessCardHtml();
+
   if(todaysExercises.length>0){
     html += '<button class="btn btn-add" style="width:100%;" onclick="openLibraryModal()">+ Ajouter un exercice</button>';
   }
@@ -4565,6 +4587,9 @@ function renderSeance(){
     html += '<div class="card"><h2 class="section-title">Note de séance</h2>'
       + '<textarea id="sessionNoteInput" placeholder="Ressenti, fatigue, sommeil..." style="width:100%; min-height:70px; background:var(--surface-3); border:1px solid var(--border); color:var(--text); border-radius:8px; padding:10px; font-size:14px; font-family:inherit; resize:vertical;" oninput="saveSessionNote(this.value)">' + escapeHtml(session.note||'') + '</textarea></div>';
     html += '<button class="btn" style="width:100%; margin-top:4px;" onclick="finishSession()">✓ Terminer la séance</button>';
+  }
+  if(viewingDateISO !== todayISO()){
+    html += dayHistoryCardHtml(viewingDateISO);
   }
   el.innerHTML = html;
 }
@@ -4941,14 +4966,28 @@ function addSet(sessionId, exoId){
   saveData();
   renderSeance();
   const restSec = suggestedRestSeconds(exo);
-  selectTimerDuration(restSec);
-  toggleTimer();
-  showToast('⏱ Repos ' + formatTime(restSec) + ' suggéré' + (exo && exo.type ? ' (' + exo.type + ')' : ''));
+  if(timerSeconds<=0){
+    selectTimerDuration(restSec);
+    showToast('⏱ Repos conseillé : ' + formatTime(restSec) + (exo && exo.type ? ' (' + exo.type + ')' : '') + ' — appuie sur Départ');
+  }
   if(!isWarmup && prevBest!==null && w>prevBest){
     showPRSharePrompt(exo ? exo.name : 'Exercice', w, r);
     const allRows = document.querySelectorAll('.set-row[data-exo-id="' + exoId + '"]');
     if(allRows.length) allRows[allRows.length-1].classList.add('flash');
   }
+}
+
+function moveSet(sessionId, exoId, idx, dir){
+  const session = data.sessions.find(s=>s.id===sessionId);
+  if(!session || !session.entries[exoId]) return;
+  const arr = session.entries[exoId];
+  const newIdx = idx + dir;
+  if(newIdx<0 || newIdx>=arr.length) return;
+  const tmp = arr[idx];
+  arr[idx] = arr[newIdx];
+  arr[newIdx] = tmp;
+  saveData();
+  renderSeance();
 }
 
 function deleteSet(sessionId, exoId, idx){
@@ -5522,7 +5561,7 @@ function renderStats(){
   + '<div class="card"><h2 class="section-title">Répartition de l\u2019effort</h2><div class="chart-wrap"><canvas id="effortCanvas"></canvas></div><div id="effortInsight"></div></div>'
   + '<div class="card"><h2 class="section-title">Profil par groupe musculaire</h2><div class="chart-wrap tall"><canvas id="radarCanvas"></canvas></div><div id="radarInsight"></div></div>'
   + '<div class="card"><h2 class="section-title">Équilibre Push/Pull &amp; Haut/Bas</h2><div id="pushPullInsight"></div></div>'
-  + '<div class="card"><h2 class="section-title">Progression par exercice</h2><div style="display:flex; gap:8px; align-items:center; margin-bottom:8px; flex-wrap:wrap;"><select id="progExoSelect" onchange="renderProgressionChart()" style="flex:1; min-width:140px;"></select><button class="btn btn-secondary" id="prog1rmToggle" style="padding:8px 12px; font-size:12px;" onclick="toggleProg1RM()">Voir le 1RM estimé</button></div><div class="chart-wrap"><canvas id="progCanvas"></canvas></div><div id="progInsight"></div></div>'
+  + '<div class="card"><h2 class="section-title">Progression par exercice</h2><div style="display:flex; gap:8px; align-items:center; margin-bottom:8px; flex-wrap:wrap;"><select id="progExoSelect" onchange="renderProgressionChart()" style="flex:1; min-width:140px;"></select></div><div class="chart-wrap"><canvas id="progCanvas"></canvas></div><div id="progInsight"></div></div>'
   + '<div class="card"><h2 class="section-title">Records personnels</h2><div id="recordsList"></div></div>';
 
   renderMonthlyRecap();
@@ -6236,19 +6275,6 @@ function renderProgressionSelector(){
   renderProgressionChart();
 }
 
-function estimated1RM(weight, reps){
-  // Epley formula — a standard, widely-used estimate for low-to-moderate
-  // rep ranges; less reliable above ~12 reps but fine as a rough gauge
-  if(!weight || !reps) return 0;
-  return weight * (1 + reps/30);
-}
-let progShow1RM = false;
-function toggleProg1RM(){
-  progShow1RM = !progShow1RM;
-  const btn = document.getElementById('prog1rmToggle');
-  if(btn) btn.textContent = progShow1RM ? 'Voir la charge max' : 'Voir le 1RM estimé';
-  renderProgressionChart();
-}
 function renderProgressionChart(){
   const sel = document.getElementById('progExoSelect');
   if(!sel || !sel.value || sel.value==='Aucune donnée') return;
@@ -6257,13 +6283,11 @@ function renderProgressionChart(){
   data.sessions.slice().sort((a,b)=> a.date<b.date?-1:1).forEach(s=>{
     const sets = s.entries[exoId];
     if(sets && sets.length){
-      bySession[s.date] = progShow1RM
-        ? Math.max(...sets.map(st=>estimated1RM(st.weight, st.reps)))
-        : Math.max(...sets.map(st=>st.weight));
+      bySession[s.date] = Math.max(...sets.map(st=>st.weight));
     }
   });
   const labels = Object.keys(bySession).map(fmtShort);
-  const values = Object.values(bySession).map(v => progShow1RM ? Math.round(v*2)/2 : v);
+  const values = Object.values(bySession);
   const ctx = document.getElementById('progCanvas');
   if(!ctx) return;
   if(progressionChart) progressionChart.destroy();
@@ -6272,7 +6296,7 @@ function renderProgressionChart(){
     data:{
       labels: labels,
       datasets:[{
-        label: progShow1RM ? '1RM estimé (kg)' : 'Charge max (kg)',
+        label: 'Charge max (kg)',
         data: values,
         borderColor:themeColor('gold','#e8d48a'),
         backgroundColor:hexToRgba(themeColor('gold','#e8d48a'),0.15),
@@ -6298,15 +6322,12 @@ function renderProgressionChart(){
   if(insightEl){
     const bw = latestWeight();
     let html = '';
-    const unitLabel = progShow1RM ? '1RM estimé' : 'charge';
-    if(bw && values.length && !progShow1RM){
+    if(bw && values.length){
       const lastVal = values[values.length-1];
       const ratio = Math.round(lastVal/bw*100);
       html += '<div class="insight">Ta charge la plus récente (' + lastVal + ' kg) représente <b>' + ratio + '%</b> de ton poids de corps (' + bw + ' kg).</div>';
-    } else if(progShow1RM && values.length){
-      html += '<div class="insight">1RM estimé (formule d\u2019Epley) à partir de ta meilleure série de chaque séance — une estimation, pas une charge à tester telle quelle.</div>';
     } else {
-      html += '<div class="insight">Renseigne ton poids dans l\u2019onglet Profil pour voir cette charge exprimée en % de ton poids de corps.</div>';
+      html += '<div class="insight">Renseigne ton poids dans l’onglet Profil pour voir cette charge exprimée en % de ton poids de corps.</div>';
     }
     if(values.length >= 3){
       const last = values[values.length-1];
@@ -6315,10 +6336,10 @@ function renderProgressionChart(){
       const trendUp = values[values.length-1] > values[values.length-2];
       if(isPlateau){
         const deload = Math.round(last*0.9*2)/2;
-        html += '<div class="insight" style="margin-top:8px;">📉 <b>Stagnation détectée</b> depuis ' + recentWindow.length + ' séances à ' + last + ' kg de ' + unitLabel + '. Essaie un deload (' + deload + ' kg) pour une séance, ou vise plus de répétitions à poids égal avant de remonter.</div>';
+        html += '<div class="insight" style="margin-top:8px;">📉 <b>Stagnation détectée</b> depuis ' + recentWindow.length + ' séances à ' + last + ' kg de charge. Essaie un deload (' + deload + ' kg) pour une séance, ou vise plus de répétitions à poids égal avant de remonter.</div>';
       } else if(trendUp){
         const nextTarget = Math.round((last+2.5)*2)/2;
-        html += '<div class="insight" style="margin-top:8px;">📈 Bonne dynamique ! Pour la prochaine séance, vise environ <b>' + nextTarget + ' kg</b>' + (progShow1RM ? ' de 1RM estimé' : '') + '.</div>';
+        html += '<div class="insight" style="margin-top:8px;">📈 Bonne dynamique ! Pour la prochaine séance, vise environ <b>' + nextTarget + ' kg</b>.</div>';
       }
     }
     insightEl.innerHTML = html;
@@ -8002,6 +8023,51 @@ async function pushExerciseRecords(){
   }
 }
 
+// Unlike pushExerciseRecords (which needs a joined league code), this pushes
+// records under a fixed "_friends" group_code so the per-exercise comparison
+// modal works for anyone who's logged in and added friends, without also
+// requiring them to join/create a separate league.
+let lastFriendsExerciseRecordsPush = 0;
+async function pushExerciseRecordsForFriends(){
+  if(!authSession) return;
+  const now = Date.now();
+  if(now - lastFriendsExerciseRecordsPush < 15000) return;
+  lastFriendsExerciseRecordsPush = now;
+  const cfg = loadSyncConfig();
+  const activeProfile = getProfilesList().find(pr=>pr.id===ACTIVE_PROFILE_ID);
+  if(!activeProfile) return;
+  const baseRows = [];
+  data.exercises.forEach(exo=>{
+    const sets = allSetsForExercise(exo.id, null);
+    if(!sets.length) return;
+    let best = sets[0];
+    sets.forEach(s=>{ if(s.weight > best.weight) best = s; });
+    baseRows.push({
+      group_code: '_friends',
+      profile_key: authSession.user.id,
+      exercise_name: normalizeStr(exo.name),
+      name: activeProfile.name,
+      avatar: activeProfile.avatar || null,
+      best_weight: best.weight,
+      best_reps: best.reps,
+      updated_at: new Date().toISOString()
+    });
+  });
+  if(!baseRows.length) return;
+  try{
+    await fetch(cfg.url.replace(/\/$/,'') + '/rest/v1/exercise_records', {
+      method:'POST',
+      headers:{
+        'Content-Type':'application/json',
+        'apikey': cfg.anonKey,
+        'Authorization':'Bearer ' + authSession.access_token,
+        'Prefer':'resolution=merge-duplicates'
+      },
+      body: JSON.stringify(baseRows)
+    });
+  }catch(e){ /* silent - best-effort */ }
+}
+
 async function openExerciseComparisonModal(exoId){
   const exo = data.exercises.find(e=>e.id===exoId);
   if(!exo) return;
@@ -8009,26 +8075,43 @@ async function openExerciseComparisonModal(exoId){
   const bg = document.getElementById('leaderboardModalBg');
   const content = document.getElementById('leaderboardModalContent');
   bg.classList.add('open');
-  const title = '<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;"><h3 style="font-size:18px;">' + escapeHtml(exo.name) + ' — Ligue</h3><button class="del-btn" style="font-size:20px;" onclick="closeLeaderboardModal()">✕</button></div>';
-  if(!authSession || !cfg.activeLeaderboardCode){
-    content.innerHTML = title + '<div class="insight">Connecte-toi avec ton email ET renseigne un \u00ab code de classement \u00bb partagé avec tes potes dans Profil → Synchronisation cloud pour comparer vos records.</div>';
+  const title = '<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;"><h3 style="font-size:18px;">' + escapeHtml(exo.name) + ' — Comparaison</h3><button class="del-btn" style="font-size:20px;" onclick="closeLeaderboardModal()">✕</button></div>';
+  if(!authSession){
+    content.innerHTML = title + '<div class="insight">Connecte-toi avec ton email dans Profil → Synchronisation cloud, puis ajoute des amis (onglet Amis) pour comparer vos records sur cet exercice.</div>';
     return;
   }
   content.innerHTML = title + loadingSpinnerHtml();
   try{
-    await pushExerciseRecords();
-    const res = await fetch(cfg.url.replace(/\/$/,'') + '/rest/v1/exercise_records?group_code=eq.' + encodeURIComponent(cfg.activeLeaderboardCode) + '&exercise_name=eq.' + encodeURIComponent(normalizeStr(exo.name)) + '&select=*&order=best_weight.desc', {
-      headers:{ 'apikey': cfg.anonKey, 'Authorization':'Bearer ' + authSession.access_token }
-    });
+    const myKey = authSession.user.id;
+    const headers = { apikey:cfg.anonKey, Authorization:'Bearer ' + authSession.access_token };
+    await pushExerciseRecordsForFriends();
+    const [receivedRes, sentRes] = await Promise.all([
+      fetch(cfg.url.replace(/\/$/,'') + '/rest/v1/friends?friend_key=eq.' + encodeURIComponent(myKey) + '&status=eq.accepted&select=*', { headers }),
+      fetch(cfg.url.replace(/\/$/,'') + '/rest/v1/friends?requester_key=eq.' + encodeURIComponent(myKey) + '&status=eq.accepted&select=*', { headers })
+    ]);
+    if(!receivedRes.ok || !sentRes.ok) throw new Error('http error');
+    const received = await receivedRes.json();
+    const sent = await sentRes.json();
+    const friendKeys = new Set([myKey]);
+    received.forEach(r=>friendKeys.add(r.requester_key));
+    sent.forEach(r=>friendKeys.add(r.friend_key));
+    const keysList = [...friendKeys].map(k=>'"'+k+'"').join(',');
+    const res = await fetch(cfg.url.replace(/\/$/,'') + '/rest/v1/exercise_records?profile_key=in.(' + encodeURIComponent(keysList) + ')&exercise_name=eq.' + encodeURIComponent(normalizeStr(exo.name)) + '&select=*&order=best_weight.desc', { headers });
     if(!res.ok) throw new Error('http error');
-    const rows = await res.json();
+    const allRows = await res.json();
+    const bestByProfile = {};
+    allRows.forEach(row=>{
+      const cur = bestByProfile[row.profile_key];
+      if(!cur || row.best_weight > cur.best_weight) bestByProfile[row.profile_key] = row;
+    });
+    const rows = Object.values(bestByProfile).sort((a,b)=>b.best_weight-a.best_weight);
     let html = title;
     if(!rows.length){
-      html += '<div class="insight">Personne n\u2019a encore loggé "' + escapeHtml(exo.name) + '" dans ta ligue.</div>';
+      html += '<div class="insight">Personne n’a encore loggé "' + escapeHtml(exo.name) + '" parmi tes amis. Ajoute des amis dans l’onglet Amis pour comparer.</div>';
     } else {
       html += '<div class="chart-wrap" style="height:' + Math.max(140, rows.length*38) + 'px;"><canvas id="exoCompareCanvas"></canvas></div>';
       rows.forEach((row,i)=>{
-        const isMe = row.profile_key === authSession.user.id;
+        const isMe = row.profile_key === myKey;
         html += '<div class="weight-log-row" style="align-items:center;' + (isMe ? ' background:var(--surface-3); border-radius:8px; padding:8px 10px;' : '') + '">'
           + '<span style="width:20px; color:var(--text-faint); font-family:\'SF Mono\',monospace;">' + (i+1) + '</span>'
           + avatarHtml({avatar:row.avatar, name:row.name}, 32)
