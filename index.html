@@ -3652,6 +3652,7 @@ function normalizeData(){
   if(!data.profile) data.profile = { heightCm:null, weightLog:[] };
   if(data.profile.age===undefined) data.profile.age = null;
   if(data.profile.birthDate===undefined) data.profile.birthDate = null;
+  if(data.profile.birthDate){ const a2 = ageFromBirthDate(data.profile.birthDate); if(a2 != null) data.profile.age = a2; }
   if(data.profile.sex===undefined) data.profile.sex = null;
   if(data.profile.activityLevel===undefined) data.profile.activityLevel = null;
   if(data.profile.metabolism===undefined) data.profile.metabolism = 'normal';
@@ -7169,6 +7170,7 @@ function saveNutritionProfile(){
   const goal = document.getElementById('nutriGoal').value;
   const metabolismEl = document.getElementById('nutriMetabolism');
   data.profile.birthDate = (birthdateEl && birthdateEl.value) ? birthdateEl.value : null;
+  if(data.profile.birthDate){ const a3 = ageFromBirthDate(data.profile.birthDate); if(a3 != null) data.profile.age = a3; }
   data.profile.sex = sex || null;
   data.profile.activityLevel = activity || null;
   data.profile.goal = goal || null;
