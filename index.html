@@ -1323,18 +1323,47 @@ function myFriendCode(){
   }
   return code;
 }
-async function ensureFriendCodeRegistered(){
+async function ensureFriendCodeRegistered(notify){
   const cfg = loadSyncConfig();
-  if(!authSession) return;
+  if(!authSession || !ACTIVE_PROFILE_ID) return false;
+  const base = cfg.url.replace(/\/$/,'') + '/rest/v1/profile_codes';
+  const headers = { 'Content-Type':'application/json', apikey:cfg.anonKey, Authorization:'Bearer '+authSession.access_token };
   const activeProfile = getProfilesList().find(pr=>pr.id===ACTIVE_PROFILE_ID);
-  const code = myFriendCode();
+  const me = authSession.user.id;
   try{
-    await fetch(cfg.url.replace(/\/$/,'') + '/rest/v1/profile_codes', {
+    // One code per ACCOUNT (not per device): reuse the one already registered
+    // for this account, picked deterministically so every device agrees.
+    const look = await fetch(base + '?sync_key=eq.' + encodeURIComponent(me) + '&select=friend_code&order=friend_code.asc&limit=1', { headers });
+    if(look.ok){
+      const rows = await look.json();
+      if(rows.length){
+        const code = rows[0].friend_code;
+        localStorage.setItem(friendCodeStorageKey(ACTIVE_PROFILE_ID), code);
+        const upd = await fetch(base + '?friend_code=eq.' + encodeURIComponent(code), {
+          method:'PATCH', headers:Object.assign({ Prefer:'return=minimal' }, headers),
+          body: JSON.stringify({ name: activeProfile ? activeProfile.name : null, avatar: activeProfile ? (activeProfile.avatar||null) : null, updated_at: new Date().toISOString() })
+        });
+        // best-effort cleanup of the extra codes older devices registered
+        fetch(base + '?sync_key=eq.' + encodeURIComponent(me) + '&friend_code=neq.' + encodeURIComponent(code), { method:'DELETE', headers }).catch(()=>{});
+        if(!upd.ok && notify) showToast("Code ami non mis à jour");
+        return true;
+      }
+    }
+    const code = myFriendCode();
+    const res = await fetch(base, {
       method:'POST',
-      headers:{ 'Content-Type':'application/json', apikey:cfg.anonKey, Authorization:'Bearer '+authSession.access_token, Prefer:'resolution=merge-duplicates' },
-      body: JSON.stringify({ friend_code:code, sync_key:authSession.user.id, name: activeProfile ? activeProfile.name : null, avatar: activeProfile ? (activeProfile.avatar||null) : null, updated_at: new Date().toISOString() })
+      headers:Object.assign({ Prefer:'resolution=merge-duplicates,return=minimal' }, headers),
+      body: JSON.stringify({ friend_code:code, sync_key:me, name: activeProfile ? activeProfile.name : null, avatar: activeProfile ? (activeProfile.avatar||null) : null, updated_at: new Date().toISOString() })
     });
-  }catch(e){ /* best-effort */ }
+    if(!res.ok){
+      if(notify){ const t = await res.text(); showToast("Code ami non enregistré : " + t.slice(0,80)); }
+      return false;
+    }
+    return true;
+  }catch(e){
+    if(notify) showToast("Code ami non enregistré (réseau)");
+    return false;
+  }
 }
 async function resolveFriendCode(code){
   const cfg = loadSyncConfig();
@@ -7507,6 +7536,7 @@ function getSupabaseClient(){
     supabaseClient._cfgKey = cfg.anonKey;
     supabaseClient.auth.onAuthStateChange((event, session)=>{
       authSession = session;
+      if(session) ensureFriendCodeRegistered(false);
       if(ACTIVE_PROFILE_ID && document.getElementById('app-root').style.display === 'block'){
         try{ renderProfil(); }catch(e){ /* profil modal not open/ready, ignore */ }
       }
@@ -7520,6 +7550,7 @@ async function initAuthSession(){
   try{
     const { data: sessData } = await client.auth.getSession();
     authSession = sessData.session;
+    ensureFriendCodeRegistered(false);
     renderProfil();
   }catch(e){ /* not configured yet, ignore */ }
 }
@@ -8405,7 +8436,7 @@ async function openFriendsModal(){
     return;
   }
   content.innerHTML = leaderboardTabsHtml('friends') + loadingSpinnerHtml();
-  ensureFriendCodeRegistered();
+  await ensureFriendCodeRegistered(true);
   try{
     const headers = { apikey:cfg.anonKey, Authorization:'Bearer '+authSession.access_token };
     const [receivedRes, sentRes] = await Promise.all([
