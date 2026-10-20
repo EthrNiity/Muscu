@@ -4509,6 +4509,7 @@ function renderSeance(){
         + '<button class="edit-btn" onclick="event.stopPropagation(); openExerciseComparisonModal(\'' + exo.id + '\')">🏆 Ligue</button>'
         + '<button class="edit-btn" onclick="event.stopPropagation(); viewProgressionFor(\'' + exo.id + '\')">📈 Progression</button>'
         + '<button class="edit-btn" onclick="event.stopPropagation(); openEditModal(\'' + exo.id + '\')">✎ Modifier</button>'
+        + '<button class="edit-btn" onclick="event.stopPropagation(); openShareModal(\'exo\', \'' + exo.id + '\')" title="Partager à un ami">📤</button>'
         + '<button class="edit-btn" onclick="event.stopPropagation(); removeFromTodaySession(\'' + session.id + '\',\'' + exo.id + '\')" title="Retirer de la séance">🗑</button>'
         + '</div>'
         + (function(){
@@ -4581,6 +4582,7 @@ function renderSeance(){
     html += '<div class="card"><h2 class="section-title">Note de séance</h2>'
       + '<textarea id="sessionNoteInput" placeholder="Ressenti, fatigue, sommeil..." style="width:100%; min-height:70px; background:var(--surface-3); border:1px solid var(--border); color:var(--text); border-radius:8px; padding:10px; font-size:14px; font-family:inherit; resize:vertical;" oninput="saveSessionNote(this.value)">' + escapeHtml(session.note||'') + '</textarea></div>';
     html += '<button class="btn" style="width:100%; margin-top:4px;" onclick="finishSession()">✓ Terminer la séance</button>';
+    html += '<button class="btn btn-secondary" style="width:100%; margin-top:8px;" onclick="openShareModal(\'session\')">📤 Partager la séance à un ami</button>';
   }
   if(viewingDateISO !== todayISO()){
     html += dayHistoryCardHtml(viewingDateISO);
@@ -8161,6 +8163,7 @@ function leaderboardTabsHtml(active){
     + '<button class="btn ' + (active==='general'?'':'btn-secondary') + '" style="padding:6px 12px; font-size:12px;" onclick="openLeaderboardModal()">Général</button>'
     + '<button class="btn ' + (active==='weekly'?'':'btn-secondary') + '" style="padding:6px 12px; font-size:12px;" onclick="openWeeklyChallengeModal()">Défi semaine</button>'
     + '<button class="btn ' + (active==='friends'?'':'btn-secondary') + '" style="padding:6px 12px; font-size:12px;" onclick="openFriendsModal()">Amis</button>'
+    + '<button class="btn ' + (active==='messages'?'':'btn-secondary') + '" style="padding:6px 12px; font-size:12px; position:relative;" onclick="openMessagesModal()">💬 Messages' + (chatUnreadTotal > 0 ? ' <span style="background:var(--accent); color:#141517; border-radius:10px; padding:0 6px; font-size:10px; font-weight:700;">' + chatUnreadTotal + '</span>' : '') + '</button>'
     + '</div>'
     + '<button class="del-btn" style="font-size:20px;" onclick="closeLeaderboardModal()">✕</button>'
     + '</div>';
@@ -8539,7 +8542,50 @@ async function respondFriendRequest(requesterKey, status){
     openFriendsModal();
   }catch(e){ showToast("Erreur : " + e.message); }
 }
-async function viewFriendProfile(friendCode){
+function isoWeekKey(iso){
+  const d = new Date(iso+"T12:00:00");
+  const date = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+  const dayNum = date.getUTCDay() || 7;
+  date.setUTCDate(date.getUTCDate() + 4 - dayNum);
+  const yearStart = new Date(Date.UTC(date.getUTCFullYear(),0,1));
+  return date.getUTCFullYear()*100 + Math.ceil((((date-yearStart)/86400000)+1)/7);
+}
+// Pure: derive display stats from a backup-shaped payload ({exercises, sessions}).
+function computeFriendStats(payload){
+  const exos = payload.exercises || [];
+  const sessions = (payload.sessions || []).filter(s=>s.entries && Object.keys(s.entries).length>0).sort((a,b)=>a.date<b.date?-1:1);
+  const exoById = {}; exos.forEach(e=>{ exoById[e.id] = e; });
+  let totalVolume = 0; const bestByName = {}; const bestRepsByName = {}; const nameByKey = {}; const groupCount = {};
+  sessions.forEach(s=>{
+    for(const id in s.entries){
+      const exo = exoById[id]; if(!exo) continue;
+      const key = normalizeStr(exo.name);
+      (s.entries[id]||[]).forEach(set=>{
+        const mult = exo.unilateral ? 2 : 1;
+        totalVolume += (set.weight||0)*(set.reps||0)*mult;
+        if(!set.warmup && (set.weight||0) > (bestByName[key]||0)){ bestByName[key] = set.weight; bestRepsByName[key] = set.reps; nameByKey[key] = exo.name; }
+      });
+      const g = (typeof radarGroupFor === 'function') ? radarGroupFor(exo.muscleGroup) : exo.muscleGroup;
+      groupCount[g] = (groupCount[g]||0) + (s.entries[id]||[]).length;
+    }
+  });
+  const cutoff = new Date(); cutoff.setDate(cutoff.getDate()-30);
+  const cutoffISO = toLocalISO(cutoff);
+  const last30 = sessions.filter(s=>s.date>=cutoffISO).length;
+  const weeks = [...new Set(sessions.map(s=>isoWeekKey(s.date)))].sort((a,b)=>a-b);
+  let best = 0, run = 0, prev = null;
+  weeks.forEach(w=>{
+    const wk = Math.floor(w/100), n = w%100;
+    const consecutive = prev && ((wk===prev.wk && n===prev.n+1) || (wk===prev.wk+1 && n===1 && prev.n>=52));
+    run = consecutive ? run+1 : 1; best = Math.max(best, run); prev = {wk, n};
+  });
+  const favGroup = Object.keys(groupCount).sort((a,b)=>groupCount[b]-groupCount[a])[0] || null;
+  const topLifts = Object.keys(bestByName).map(k=>({key:k, name:nameByKey[k], weight:bestByName[k], reps:bestRepsByName[k]})).sort((a,b)=>b.weight-a.weight).slice(0,5);
+  const recentSessions = sessions.slice(-5).reverse().map(s=>({ date:s.date, exoCount:Object.keys(s.entries).length, label: s.customName || 'Séance' }));
+  return { sessions:sessions.length, last30, bestStreakWeeks:best, totalVolume, exercisesCount:Object.keys(bestByName).length, favGroup, topLifts, bestByName, recentSessions, lastDate: sessions.length ? sessions[sessions.length-1].date : null };
+}
+async function viewFriendProfile(friendKey){
+  const friendCode = friendKey;
   const cfg = loadSyncConfig();
   const content = document.getElementById('leaderboardModalContent');
   content.innerHTML = leaderboardTabsHtml('friends') + loadingSpinnerHtml();
@@ -8559,25 +8605,41 @@ async function viewFriendProfile(friendCode){
     }
     const friendData = rows[0].payload;
     const friendProfile = friendData._identity || {};
-    const sessionsCount = (friendData.sessions||[]).filter(s=>Object.keys(s.entries||{}).length>0).length;
-    let bestLift = null;
-    (friendData.exercises||[]).forEach(exo=>{
-      (friendData.sessions||[]).forEach(s=>{
-        (s.entries[exo.id]||[]).forEach(st=>{
-          if(!bestLift || st.weight > bestLift.weight) bestLift = { name:exo.name, weight:st.weight, reps:st.reps };
-        });
-      });
-    });
+    const st = computeFriendStats(friendData);
+    const mine = computeFriendStats({ exercises:data.exercises, sessions:data.sessions });
+    const fmt = n => Math.round(n).toLocaleString('fr-FR');
+    const cmp = (a,b) => a===b ? '' : (a>b ? '<span style="color:var(--green); font-size:11px;"> ▲</span>' : '<span style="color:var(--text-faint); font-size:11px;"> ▼</span>');
     let html = leaderboardTabsHtml('friends');
     html += '<div style="display:flex; align-items:center; gap:12px; margin-bottom:14px;">'
-      + avatarHtml({avatar:friendProfile.avatar, name:friendProfile.name||friendCode}, 48)
-      + '<div><div style="font-size:16px; font-weight:600;">' + escapeHtml(friendProfile.name||friendCode) + '</div>'
-      + '<div style="font-size:12px; color:var(--text-faint);">Dernière sync : ' + new Date(rows[0].updated_at).toLocaleDateString('fr-FR') + '</div></div>'
+      + avatarHtml({avatar:friendProfile.avatar, name:friendProfile.name||'Ami'}, 48)
+      + '<div style="flex:1;"><div style="font-size:16px; font-weight:600;">' + escapeHtml(friendProfile.name||'Ami') + '</div>'
+      + '<div style="font-size:12px; color:var(--text-faint);">Dernière sync : ' + new Date(rows[0].updated_at).toLocaleDateString('fr-FR') + (st.lastDate ? ' · dernière séance le ' + new Date(st.lastDate+"T12:00:00").toLocaleDateString('fr-FR') : '') + '</div></div>'
+      + '<button class="btn btn-add" style="padding:8px 12px; font-size:12px;" onclick="openChatWith(\'' + friendKey + '\')">💬 Message</button>'
       + '</div>';
     html += '<div class="stat-row">'
-      + '<div class="stat-box"><div class="v">' + sessionsCount + '</div><div class="l">séances</div></div>'
-      + (bestLift ? '<div class="stat-box"><div class="v">' + bestLift.weight + 'kg</div><div class="l">' + escapeHtml(bestLift.name) + '</div></div>' : '')
+      + '<div class="stat-box"><div class="v">' + st.sessions + '</div><div class="l">séances' + cmp(st.sessions, mine.sessions) + '</div></div>'
+      + '<div class="stat-box"><div class="v">' + st.last30 + '</div><div class="l">sur 30 j' + cmp(st.last30, mine.last30) + '</div></div>'
+      + '<div class="stat-box"><div class="v">' + st.bestStreakWeeks + '</div><div class="l">sem. d’affilée' + cmp(st.bestStreakWeeks, mine.bestStreakWeeks) + '</div></div>'
       + '</div>';
+    html += '<div class="stat-row" style="margin-top:8px;">'
+      + '<div class="stat-box"><div class="v">' + fmt(st.totalVolume/1000) + ' t</div><div class="l">volume total' + cmp(st.totalVolume, mine.totalVolume) + '</div></div>'
+      + '<div class="stat-box"><div class="v">' + st.exercisesCount + '</div><div class="l">exercices' + cmp(st.exercisesCount, mine.exercisesCount) + '</div></div>'
+      + '<div class="stat-box"><div class="v">' + (st.favGroup || '—') + '</div><div class="l">groupe favori</div></div>'
+      + '</div>';
+    if(st.topLifts.length){
+      html += '<div style="font-size:11px; color:var(--text-faint); text-transform:uppercase; margin:16px 0 6px;">Meilleurs records</div>';
+      st.topLifts.forEach(l=>{
+        const myBest = mine.bestByName[l.key];
+        html += '<div class="weight-log-row"><span class="d" style="flex:1;">' + escapeHtml(l.name) + '</span><span class="d">' + l.weight + ' kg' + (l.reps ? ' × ' + l.reps : '') + '</span>'
+          + (myBest != null ? '<span style="font-size:11px; color:var(--text-faint); margin-left:8px;">toi : ' + myBest + ' kg</span>' : '') + '</div>';
+      });
+    }
+    if(st.recentSessions.length){
+      html += '<div style="font-size:11px; color:var(--text-faint); text-transform:uppercase; margin:16px 0 6px;">Dernières séances</div>';
+      st.recentSessions.forEach(s=>{
+        html += '<div class="weight-log-row"><span class="d" style="flex:1;">' + escapeHtml(s.label) + '</span><span style="font-size:12px; color:var(--text-faint);">' + new Date(s.date+"T12:00:00").toLocaleDateString('fr-FR',{day:'numeric',month:'short'}) + ' · ' + s.exoCount + ' exos</span></div>';
+      });
+    }
     html += '<button class="btn btn-secondary" style="width:100%; margin-top:14px;" onclick="openFriendsModal()">← Retour</button>';
     content.innerHTML = html;
   }catch(e){
@@ -8731,7 +8793,303 @@ async function openWeeklyChallengeModal(){
     content.innerHTML = leaderboardTabsHtml('weekly') + '<div class="insight">Erreur réseau<br><span style="font-family:monospace; font-size:11px;">' + escapeHtml(e.message) + '</span></div>';
   }
 }
+
+// ---------- Messagerie (privé + groupe de ligue) & partage ----------
+// Requires the Supabase table "messages" (see messages_setup.sql).
+let chatUnreadTotal = 0;
+let chatPollTimer = null;
+let activeConv = null; // {type:'dm'|'group', id, title}
+function chatSeenKey(convId){ return 'ethrniity-chat-seen-' + ACTIVE_PROFILE_ID + '-' + convId; }
+function chatHeaders(extra){
+  const cfg = loadSyncConfig();
+  return Object.assign({ apikey:cfg.anonKey, Authorization:'Bearer ' + authSession.access_token, 'Content-Type':'application/json' }, extra||{});
+}
+function chatUrl(path){ return loadSyncConfig().url.replace(/\/$/,'') + '/rest/v1/' + path; }
+function convIdOfMessage(m, myKey){
+  if(m.group_code) return 'group:' + m.group_code;
+  return 'dm:' + (m.sender_key===myKey ? m.recipient_key : m.sender_key);
+}
+async function getAcceptedFriends(){
+  const myKey = authSession.user.id;
+  const h = chatHeaders();
+  const [a, b] = await Promise.all([
+    fetch(chatUrl('friends?friend_key=eq.' + encodeURIComponent(myKey) + '&status=eq.accepted&select=*'), { headers:h }),
+    fetch(chatUrl('friends?requester_key=eq.' + encodeURIComponent(myKey) + '&status=eq.accepted&select=*'), { headers:h })
+  ]);
+  if(!a.ok || !b.ok) throw new Error('friends');
+  const keys = new Set();
+  (await a.json()).forEach(r=>keys.add(r.requester_key));
+  (await b.json()).forEach(r=>keys.add(r.friend_key));
+  keys.delete(myKey);
+  const names = {};
+  if(keys.size){
+    try{
+      const list = [...keys].map(k=>'"'+k+'"').join(',');
+      const r = await fetch(chatUrl('profile_codes?sync_key=in.(' + encodeURIComponent(list) + ')&select=sync_key,name'), { headers:h });
+      if(r.ok) (await r.json()).forEach(row=>{ names[row.sync_key] = row.name; });
+    }catch(e){}
+  }
+  return [...keys].map(k=>({ key:k, name: names[k] || 'Ami' }));
+}
+async function fetchRecentMessages(){
+  const myKey = authSession.user.id;
+  const codes = loadSyncConfig().leaderboardCodes.map(c=>'"' + String(c).replace(/"/g,'') + '"');
+  let cond = 'sender_key.eq.' + myKey + ',recipient_key.eq.' + myKey;
+  if(codes.length) cond += ',group_code.in.(' + codes.join(',') + ')';
+  const res = await fetch(chatUrl('messages?or=(' + encodeURIComponent(cond) + ')&order=created_at.desc&limit=300&select=*'), { headers:chatHeaders() });
+  if(!res.ok) throw new Error('messages');
+  return await res.json();
+}
+function computeUnread(messages, myKey){
+  const byConv = {};
+  messages.forEach(m=>{
+    if(m.sender_key===myKey) return;
+    const id = convIdOfMessage(m, myKey);
+    const seen = localStorage.getItem(chatSeenKey(id)) || '';
+    if(m.created_at > seen) byConv[id] = (byConv[id]||0) + 1;
+  });
+  return byConv;
+}
+async function refreshChatBadge(){
+  if(!authSession) return;
+  try{
+    const msgs = await fetchRecentMessages();
+    const unread = computeUnread(msgs, authSession.user.id);
+    const total = Object.values(unread).reduce((a,b)=>a+b,0);
+    if(total > chatUnreadTotal && chatUnreadTotal !== null && document.getElementById('app-root') && document.getElementById('app-root').style.display==='block'){
+      showToast('💬 ' + (total - chatUnreadTotal) + ' nouveau(x) message(s)');
+    }
+    chatUnreadTotal = total;
+  }catch(e){ /* table missing or offline: stay silent */ }
+}
+setInterval(()=>{ if(!document.hidden) refreshChatBadge(); }, 60000);
+
+function stopChatPolling(){ if(chatPollTimer){ clearInterval(chatPollTimer); chatPollTimer = null; } }
+async function openMessagesModal(){
+  stopChatPolling(); activeConv = null;
+  const content = document.getElementById('leaderboardModalContent');
+  document.getElementById('leaderboardModalBg').classList.add('open');
+  if(!authSession){
+    content.innerHTML = leaderboardTabsHtml('messages') + '<div class="insight">Connecte-toi avec ton email dans Profil → Synchronisation cloud pour utiliser la messagerie.</div>';
+    return;
+  }
+  content.innerHTML = leaderboardTabsHtml('messages') + loadingSpinnerHtml();
+  try{
+    const myKey = authSession.user.id;
+    const [friends, msgs] = await Promise.all([getAcceptedFriends(), fetchRecentMessages()]);
+    const unread = computeUnread(msgs, myKey);
+    chatUnreadTotal = Object.values(unread).reduce((a,b)=>a+b,0);
+    const lastByConv = {};
+    msgs.forEach(m=>{ const id = convIdOfMessage(m, myKey); if(!lastByConv[id]) lastByConv[id] = m; });
+    const convs = [];
+    loadSyncConfig().leaderboardCodes.forEach(c=>convs.push({ type:'group', id:c, title:'👥 ' + c, key:'group:' + c }));
+    friends.forEach(f=>convs.push({ type:'dm', id:f.key, title:f.name, key:'dm:' + f.key }));
+    convs.sort((a,b)=>{ const la = lastByConv[a.key], lb = lastByConv[b.key]; return (lb?lb.created_at:'') .localeCompare(la?la.created_at:''); });
+    let html = leaderboardTabsHtml('messages');
+    if(!convs.length){
+      html += '<div class="insight">Ajoute des amis (onglet Amis) ou rejoins une ligue (Profil → Synchronisation cloud) pour discuter.</div>';
+    } else {
+      convs.forEach(c=>{
+        const last = lastByConv[c.key];
+        const u = unread[c.key] || 0;
+        const preview = last ? (last.kind==='text' ? last.body : (last.kind==='session' ? '📋 Séance partagée' : '🏋️ Exercices partagés')) : 'Aucun message';
+        html += '<div class="weight-log-row" style="cursor:pointer; align-items:center;" onclick="openConversation(\'' + c.type + '\',\'' + escapeHtml(String(c.id)).replace(/'/g,"\\'") + '\',\'' + escapeHtml(c.title).replace(/'/g,"\\'") + '\')">'
+          + '<div style="flex:1; min-width:0;"><div style="font-weight:600;">' + escapeHtml(c.title) + '</div>'
+          + '<div style="font-size:12px; color:var(--text-faint); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">' + escapeHtml(String(preview||'').slice(0,60)) + '</div></div>'
+          + (u ? '<span style="background:var(--accent); color:#141517; border-radius:10px; padding:1px 7px; font-size:11px; font-weight:700;">' + u + '</span>' : '')
+          + '</div>';
+      });
+    }
+    content.innerHTML = html;
+  }catch(e){
+    content.innerHTML = leaderboardTabsHtml('messages') + '<div class="insight">Messagerie indisponible. As-tu bien créé la table « messages » dans Supabase (fichier messages_setup.sql) ?</div>';
+  }
+}
+function openChatWith(friendKey){
+  document.getElementById('leaderboardModalBg').classList.add('open');
+  openConversation('dm', friendKey, 'Ami');
+}
+async function loadThreadMessages(){
+  const myKey = authSession.user.id;
+  let q;
+  if(activeConv.type==='group'){
+    q = 'messages?group_code=eq.' + encodeURIComponent(activeConv.id) + '&order=created_at.asc&limit=200&select=*';
+  } else {
+    const o = activeConv.id;
+    const cond = 'and(sender_key.eq.' + myKey + ',recipient_key.eq.' + o + '),and(sender_key.eq.' + o + ',recipient_key.eq.' + myKey + ')';
+    q = 'messages?or=(' + encodeURIComponent(cond) + ')&order=created_at.asc&limit=200&select=*';
+  }
+  const res = await fetch(chatUrl(q), { headers:chatHeaders() });
+  if(!res.ok) throw new Error('thread');
+  return await res.json();
+}
+function sharedCardHtml(m, mine){
+  const p = m.payload || {};
+  const exos = Array.isArray(p.exercises) ? p.exercises : [];
+  let html = '<div style="margin-top:6px; padding:8px; border-radius:8px; background:rgba(0,0,0,0.18);">'
+    + '<div style="font-weight:600; font-size:13px; margin-bottom:4px;">' + (m.kind==='session' ? '📋 ' + escapeHtml(p.title || 'Séance') : '🏋️ Exercices partagés') + '</div>';
+  exos.slice(0,12).forEach(e=>{
+    const sets = Array.isArray(e.sets) ? e.sets : [];
+    html += '<div style="font-size:12px; line-height:1.5;">• ' + escapeHtml(e.name) + (sets.length ? ' — ' + sets.slice(0,6).map(s=>s.weight + '×' + s.reps).join(', ') : '') + '</div>';
+  });
+  if(!mine) html += '<button class="btn btn-add" style="width:100%; margin-top:8px; padding:6px; font-size:12px;" onclick="importSharedMessage(\'' + m.id + '\')">+ Ajouter à ma séance du jour</button>';
+  return html + '</div>';
+}
+let threadCache = [];
+function renderThreadMessages(msgs){
+  const myKey = authSession.user.id;
+  threadCache = msgs;
+  return msgs.map(m=>{
+    const mine = m.sender_key===myKey;
+    const time = new Date(m.created_at).toLocaleString('fr-FR', { day:'numeric', month:'short', hour:'2-digit', minute:'2-digit' });
+    return '<div style="display:flex; justify-content:' + (mine?'flex-end':'flex-start') + '; margin-bottom:8px;">'
+      + '<div style="max-width:82%; padding:8px 12px; border-radius:12px; background:' + (mine ? 'var(--accent)' : 'var(--surface-3)') + '; color:' + (mine ? '#141517' : 'var(--text)') + ';">'
+      + (!mine && activeConv.type==='group' ? '<div style="font-size:11px; font-weight:700; opacity:0.75; margin-bottom:2px;">' + escapeHtml(m.sender_name || 'Membre') + '</div>' : '')
+      + (m.body ? '<div style="font-size:14px; white-space:pre-wrap; word-break:break-word;">' + escapeHtml(m.body) + '</div>' : '')
+      + (m.kind!=='text' ? sharedCardHtml(m, mine) : '')
+      + '<div style="font-size:10px; opacity:0.6; margin-top:3px; text-align:right;">' + time + '</div>'
+      + '</div></div>';
+  }).join('') || '<div class="insight">Aucun message pour l’instant — dis bonjour 👋</div>';
+}
+async function openConversation(type, id, title){
+  stopChatPolling();
+  activeConv = { type, id, title };
+  const content = document.getElementById('leaderboardModalContent');
+  document.getElementById('leaderboardModalBg').classList.add('open');
+  if(!authSession){ openMessagesModal(); return; }
+  content.innerHTML = '<div style="display:flex; align-items:center; gap:8px; margin-bottom:10px;">'
+    + '<button class="btn btn-secondary" style="padding:6px 10px;" onclick="openMessagesModal()">←</button>'
+    + '<div style="flex:1; font-weight:600; font-size:16px;">' + escapeHtml(title) + '</div>'
+    + '<button class="del-btn" style="font-size:20px;" onclick="closeLeaderboardModal()">✕</button></div>'
+    + '<div id="chatThread" style="max-height:50vh; overflow-y:auto; padding:2px;">' + loadingSpinnerHtml() + '</div>'
+    + '<div style="display:flex; gap:8px; margin-top:10px;">'
+    + '<input type="text" id="chatInput" placeholder="Écrire un message..." autocomplete="off" style="flex:1; min-width:0;" onkeydown="if(event.key===\'Enter\') sendChatText()">'
+    + '<button class="btn btn-add" onclick="sendChatText()">Envoyer</button></div>';
+  await refreshThread(true);
+  chatPollTimer = setInterval(()=>{ if(activeConv && !document.hidden) refreshThread(false); }, 8000);
+}
+async function refreshThread(forceScroll){
+  const box = document.getElementById('chatThread');
+  if(!box || !activeConv) return;
+  try{
+    const msgs = await loadThreadMessages();
+    const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+    const sig = msgs.length + ':' + (msgs.length ? msgs[msgs.length-1].id : '');
+    if(box.dataset.sig !== sig){
+      box.innerHTML = renderThreadMessages(msgs);
+      box.dataset.sig = sig;
+      if(forceScroll || nearBottom) box.scrollTop = box.scrollHeight;
+    }
+    if(msgs.length){
+      const convId = activeConv.type==='group' ? 'group:' + activeConv.id : 'dm:' + activeConv.id;
+      localStorage.setItem(chatSeenKey(convId), msgs[msgs.length-1].created_at);
+      refreshChatBadge();
+    }
+  }catch(e){
+    box.innerHTML = '<div class="insight">Impossible de charger la conversation (table « messages » créée dans Supabase ?).</div>';
+  }
+}
+async function sendMessageRow(conv, body, kind, payload){
+  const activeProfile = getProfilesList().find(pr=>pr.id===ACTIVE_PROFILE_ID);
+  const row = {
+    sender_key: authSession.user.id,
+    sender_name: activeProfile ? activeProfile.name : null,
+    recipient_key: conv.type==='dm' ? conv.id : null,
+    group_code: conv.type==='group' ? conv.id : null,
+    body: body || null,
+    kind: kind || 'text',
+    payload: payload || null
+  };
+  const res = await fetch(chatUrl('messages'), { method:'POST', headers:chatHeaders({ Prefer:'return=minimal' }), body: JSON.stringify(row) });
+  if(!res.ok) throw new Error(await res.text());
+}
+async function sendChatText(){
+  const input = document.getElementById('chatInput');
+  if(!input || !activeConv) return;
+  const body = input.value.trim();
+  if(!body) return;
+  input.value = '';
+  try{
+    await sendMessageRow(activeConv, body, 'text', null);
+    refreshThread(true);
+  }catch(e){ input.value = body; showToast("Envoi impossible : " + String(e.message).slice(0,60)); }
+}
+
+// ----- Partage de séance / d'exercices -----
+let shareDraft = null; // {kind, title, exercises}
+function buildSharePayload(exoIds, session){
+  return exoIds.map(id=>{
+    const exo = data.exercises.find(e=>e.id===id);
+    if(!exo) return null;
+    const sets = ((session.entries||{})[id] || []).filter(s=>!s.warmup).map(s=>({ weight:s.weight, reps:s.reps }));
+    return { name:exo.name, muscleGroup:exo.muscleGroup, type:exo.type, equipment:exo.equipment||null, unilateral:!!exo.unilateral, sets };
+  }).filter(Boolean);
+}
+async function openShareModal(mode, exoId){
+  if(!authSession){ showToast("Connecte-toi d'abord (Profil → Synchronisation cloud)"); return; }
+  const session = getOrCreateTodaySession();
+  const ids = mode==='exo' ? [exoId] : (session.activeExercises||[]);
+  const exercises = buildSharePayload(ids, session);
+  if(!exercises.length){ showToast("Rien à partager pour l'instant"); return; }
+  shareDraft = { kind: mode==='exo' ? 'exercises' : 'session', title: session.customName || ('Séance du ' + new Date(session.date+"T12:00:00").toLocaleDateString('fr-FR',{day:'numeric',month:'long'})), exercises };
+  const content = document.getElementById('leaderboardModalContent');
+  document.getElementById('leaderboardModalBg').classList.add('open');
+  content.innerHTML = '<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;"><h3 style="font-size:18px;">📤 Partager</h3><button class="del-btn" style="font-size:20px;" onclick="closeLeaderboardModal()">✕</button></div>' + loadingSpinnerHtml();
+  let friends = [];
+  try{ friends = await getAcceptedFriends(); }catch(e){}
+  const codes = loadSyncConfig().leaderboardCodes;
+  let html = '<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;"><h3 style="font-size:18px;">📤 Partager</h3><button class="del-btn" style="font-size:20px;" onclick="closeLeaderboardModal()">✕</button></div>'
+    + '<div class="insight" style="margin-top:0;">' + (shareDraft.kind==='session' ? '📋 ' + escapeHtml(shareDraft.title) : '🏋️ ' + escapeHtml(exercises[0].name)) + ' — ' + exercises.length + ' exo(s)</div>'
+    + '<label style="margin-top:12px;">Destinataires</label>';
+  if(!friends.length && !codes.length) html += '<div style="font-size:12px; color:var(--text-faint);">Ajoute des amis ou rejoins une ligue d’abord.</div>';
+  friends.forEach(f=>{ html += '<label style="display:flex; align-items:center; gap:8px; margin:6px 0;"><input type="checkbox" class="shareTarget" data-type="dm" data-id="' + escapeHtml(f.key) + '" style="width:18px; height:18px;"> ' + escapeHtml(f.name) + '</label>'; });
+  codes.forEach(c=>{ html += '<label style="display:flex; align-items:center; gap:8px; margin:6px 0;"><input type="checkbox" class="shareTarget" data-type="group" data-id="' + escapeHtml(c) + '" style="width:18px; height:18px;"> 👥 ' + escapeHtml(c) + ' <span style="font-size:11px; color:var(--text-faint);">(chat de groupe)</span></label>'; });
+  html += '<label style="margin-top:12px;">Note (facultatif)</label><textarea id="shareNote" placeholder="Ex : à tester cette semaine, essaie de monter de 2,5 kg…" style="width:100%; min-height:70px; background:var(--surface-3); border:1px solid var(--border); color:var(--text); border-radius:8px; padding:10px; font-size:14px; font-family:inherit;"></textarea>'
+    + '<button class="btn btn-add" style="width:100%; margin-top:12px;" onclick="confirmShare()">Envoyer</button>';
+  content.innerHTML = html;
+}
+async function confirmShare(){
+  if(!shareDraft) return;
+  const targets = [...document.querySelectorAll('.shareTarget:checked')].map(el=>({ type:el.dataset.type, id:el.dataset.id }));
+  if(!targets.length){ showToast("Choisis au moins un destinataire"); return; }
+  const note = (document.getElementById('shareNote').value || '').trim();
+  const payload = { title: shareDraft.title, exercises: shareDraft.exercises };
+  try{
+    for(const t of targets) await sendMessageRow(t, note, shareDraft.kind, payload);
+    showToast("Envoyé à " + targets.length + " destinataire(s)");
+    shareDraft = null;
+    openMessagesModal();
+  }catch(e){ showToast("Envoi impossible : " + String(e.message).slice(0,60)); }
+}
+function importSharedMessage(msgId){
+  const m = threadCache.find(x=>x.id===msgId);
+  if(!m || !m.payload || !Array.isArray(m.payload.exercises)) return;
+  const session = getOrCreateTodaySession();
+  let added = 0;
+  m.payload.exercises.forEach(e=>{
+    let exo = data.exercises.find(x=>normalizeStr(x.name)===normalizeStr(e.name));
+    if(!exo){
+      exo = { id:'exo_'+Date.now()+'_'+Math.random().toString(36).slice(2,6), name:e.name, muscleGroup:e.muscleGroup || 'Pectoraux', type:e.type || 'Volume' };
+      if(e.equipment) exo.equipment = e.equipment;
+      if(e.unilateral) exo.unilateral = true;
+      data.exercises.push(exo);
+    }
+    if(!session.activeExercises.includes(exo.id)){
+      session.activeExercises.push(exo.id);
+      if(Array.isArray(e.sets) && e.sets.length){
+        if(!session.targetSets) session.targetSets = {};
+        session.targetSets[exo.id] = e.sets.length;
+      }
+      added++;
+    }
+  });
+  saveData();
+  renderSeance();
+  showToast(added ? added + " exercice(s) ajouté(s) à ta séance" : "Déjà dans ta séance");
+}
+
 function closeLeaderboardModal(){
+  stopChatPolling(); activeConv = null;
   document.getElementById('leaderboardModalBg').classList.remove('open');
 }
 
