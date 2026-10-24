@@ -876,6 +876,17 @@
     background:linear-gradient(110deg,#c99a2e 20%,#fff1b8 40%,#c99a2e 60%); background-size:220% 100%; animation:creatorShimmer 3.2s linear infinite; }
   @keyframes creatorShimmer{ 0%{ background-position:200% 0; } 100%{ background-position:-20% 0; } }
   @media (prefers-reduced-motion: reduce){ .creator-badge{ animation:none; } }
+
+  .creator-welcome{ position:fixed; inset:0; z-index:35; pointer-events:none; display:flex; align-items:center; justify-content:center;
+    background:radial-gradient(circle at center, rgba(244,217,138,0.28), rgba(0,0,0,0.55) 70%); animation:cwFade 2.6s ease forwards; }
+  .cw-inner{ position:relative; text-align:center; }
+  .cw-crown{ font-size:64px; animation:cwCrown 1.2s cubic-bezier(0.2,0.9,0.3,1.2) both; }
+  .cw-title{ margin-top:6px; font-size:20px; font-weight:700; letter-spacing:0.06em; color:#f4d98a; text-shadow:0 0 18px rgba(244,217,138,0.8); animation:cwText 1.2s ease 0.25s both; }
+  .cw-inner span{ position:absolute; left:50%; top:30%; width:6px; height:6px; border-radius:50%; background:#f4d98a; box-shadow:0 0 8px #f4d98a; opacity:0; animation:cwSpark 1.4s ease-out forwards; }
+  @keyframes cwFade{ 0%{opacity:0;} 15%{opacity:1;} 75%{opacity:1;} 100%{opacity:0;} }
+  @keyframes cwCrown{ 0%{ transform:translateY(-40px) scale(0.3); opacity:0; } 100%{ transform:none; opacity:1; } }
+  @keyframes cwText{ 0%{ opacity:0; transform:translateY(8px); } 100%{ opacity:1; transform:none; } }
+  @keyframes cwSpark{ 0%{ opacity:0; transform:translate(0,0); } 20%{ opacity:1; } 100%{ opacity:0; transform:translate(var(--dx),var(--dy)); } }
 </style>
 </head>
 <body>
@@ -902,6 +913,7 @@
   <div id="view-stats" class="view"></div>
   <div id="view-nutrition" class="view"></div>
   <div id="view-histo" class="view"></div>
+  <div id="view-createur" class="view"></div>
 </main>
 
 <nav class="tabs">
@@ -909,6 +921,7 @@
   <button data-view="stats">Stats</button>
   <button data-view="nutrition">Nutrition</button>
   <button data-view="histo">Historique</button>
+  <button data-view="createur" id="creatorTabBtn" style="display:none; font-size:10px;">👑 Créateur</button>
   <div class="tab-underline" id="tabUnderline" style="left:0%;"></div>
 </nav>
 
@@ -1648,6 +1661,14 @@ const CREATOR_THEME_PACK = {
   pattern: null,
   decoration: null
 };
+function updateCreatorTab(){
+  const btn = document.getElementById('creatorTabBtn');
+  if(!btn) return;
+  btn.style.display = creatorMode ? '' : 'none';
+  const active = document.querySelector('nav.tabs button.active');
+  if(!creatorMode && active && active.dataset.view==='createur') switchTab('seance');
+  else if(active) switchTab(active.dataset.view);
+}
 async function sha256Hex(str){
   const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
   return [...new Uint8Array(buf)].map(b=>b.toString(16).padStart(2,'0')).join('');
@@ -1659,10 +1680,12 @@ async function detectCreator(){
       isCreator = (await sha256Hex(authSession.user.email.trim().toLowerCase())) === CREATOR_EMAIL_HASH;
     }
   }catch(e){ return; }
-  if(isCreator === creatorMode) return;
+  if(isCreator === creatorMode){ if(isCreator){ try{ updateCreatorTab(); }catch(e){} scheduleCreatorWelcome(); } return; }
   creatorMode = isCreator;
   if(isCreator) localStorage.setItem('ethrniity-creator-cached','1'); else localStorage.removeItem('ethrniity-creator-cached');
   try{ applyCustomColors(); }catch(e){}
+  try{ updateCreatorTab(); }catch(e){}
+  if(isCreator) scheduleCreatorWelcome();
   try{ if(document.getElementById('profileModalContent')) renderProfil(); }catch(e){}
 }
 function isCreatorKey(userId){
@@ -1738,15 +1761,18 @@ async function creatorFetchAllCodes(){
   return by;
 }
 async function creatorListAccounts(){
-  creatorOut('Chargement…');
+  const box = document.getElementById('creatorAccountsBox');
+  if(box) box.innerHTML = loadingSpinnerHtml();
   try{
     const by = await creatorFetchAllCodes();
     const keys = Object.keys(by);
-    creatorOut('<b>' + keys.length + ' compte(s) avec un code ami</b><br>' + keys.map(k=>{
+    if(box) box.innerHTML = '<div style="margin-bottom:6px; color:var(--text-faint); font-size:12px;">' + keys.length + ' compte(s) avec un code ami</div>' + keys.map(k=>{
       const l = by[k];
-      return escapeHtml(l[0].name || 'Sans nom') + creatorBadgeHtml(k) + ' — ' + l.map(x=>'#' + escapeHtml(x.friend_code)).join(', ') + (l.length>1 ? ' ⚠️' : '');
-    }).join('<br>') + '<div style="font-size:11px; color:var(--text-faint); margin-top:6px;">Tu vois tous les comptes seulement si tes règles « admin » Supabase sont actives ; sinon tu ne vois que ceux que tes règles autorisent.</div>');
-  }catch(e){ creatorOut('Erreur : ' + escapeHtml(e.message)); }
+      return '<div class="weight-log-row" style="align-items:center; cursor:pointer;" onclick="creatorViewAccount(\'' + k + '\')"><span style="flex:1; min-width:0;">'
+        + escapeHtml(l[0].name || 'Sans nom') + creatorBadgeHtml(k) + '<div style="font-size:11px; color:var(--text-faint);">' + l.map(x=>'#' + escapeHtml(x.friend_code)).join(', ') + (l.length>1 ? ' ⚠️ doublon' : '') + '</div></span>'
+        + '<span style="color:var(--accent); font-size:12px;">Voir →</span></div>';
+    }).join('') + '<div style="font-size:11px; color:var(--text-faint); margin-top:6px;">Tu vois tous les comptes seulement si tes règles « admin » Supabase sont actives.</div>';
+  }catch(e){ if(box) box.innerHTML = 'Erreur : ' + escapeHtml(e.message); }
 }
 async function creatorCleanAllFriendCodes(){
   try{
@@ -1775,6 +1801,158 @@ async function creatorPruneBackups(){
   creatorOut('Purge…');
   await pruneOldTimestampedBackups();
   creatorOut('Purge terminée : on garde les 10 sauvegardes datées les plus récentes + la sauvegarde quotidienne.');
+}
+
+// ---------- Onglet Créateur ----------
+function creatorCard(title, inner){
+  return '<div class="card"><h2 class="section-title">' + title + '</h2>' + inner + '</div>';
+}
+function renderCreatorView(){
+  const el = document.getElementById('view-createur');
+  if(!el) return;
+  if(!creatorMode || !authSession){ el.innerHTML = creatorCard('👑 Espace Créateur', '<div class="insight" style="margin-top:0;">Connecte-toi avec ton compte créateur pour accéder à cet espace.</div>'); return; }
+  const name = (getProfilesList().find(pr=>pr.id===ACTIVE_PROFILE_ID) || {}).name || 'Créateur';
+  let html = '<div class="card" style="border:1px solid var(--gold); text-align:center;">'
+    + '<div style="font-size:30px;">👑</div>'
+    + '<h2 class="section-title" style="margin:6px 0 2px;">Espace Créateur</h2>'
+    + '<div style="font-size:12px; color:var(--text-faint);">Bonjour ' + escapeHtml(name) + ' — tout ce qui est ici n’est visible que par toi.</div></div>';
+  html += creatorCard('📊 Statistiques globales',
+    '<div id="creatorStatsBox">' + loadingSpinnerHtml() + '</div>'
+    + '<button class="btn btn-secondary" style="width:100%; margin-top:10px;" onclick="loadCreatorStats()">↻ Actualiser</button>');
+  html += creatorCard('📢 Annonce à tous',
+    '<div style="font-size:12px; color:var(--text-faint); margin-bottom:8px; line-height:1.5;">Apparaît dans l’onglet 💬 Messages → « Annonces » de chaque utilisateur.</div>'
+    + '<textarea id="creatorAnnounceInput" placeholder="Ex : nouvelle version disponible, pense à mettre à jour !" style="width:100%; min-height:80px; background:var(--surface-3); border:1px solid var(--border); color:var(--text); border-radius:8px; padding:10px; font-size:14px; font-family:inherit;"></textarea>'
+    + '<button class="btn btn-add" style="width:100%; margin-top:8px;" onclick="creatorSendAnnouncement()">Envoyer à tout le monde</button>');
+  html += creatorCard('👥 Comptes',
+    '<div id="creatorAccountsBox" style="font-size:13px;"></div>'
+    + '<button class="btn btn-secondary" style="width:100%; margin-top:8px;" onclick="creatorListAccounts()">Charger les comptes</button>');
+  html += creatorToolsHtml();
+  html += creatorCard('📦 Export',
+    '<div style="font-size:12px; color:var(--text-faint); margin-bottom:8px; line-height:1.5;">Télécharge la sauvegarde quotidienne de tous les comptes dans un seul fichier JSON (contient des données personnelles : à garder pour toi).</div>'
+    + '<button class="btn btn-secondary" style="width:100%;" onclick="creatorExportAll()">Exporter toutes les sauvegardes</button>'
+    + '<div id="creatorExportOutput" style="margin-top:8px; font-size:12px; color:var(--text-dim);"></div>');
+  el.innerHTML = html;
+  loadCreatorStats();
+}
+async function creatorCount(path){
+  const cfg = loadSyncConfig();
+  try{
+    const r = await fetch(cfg.url.replace(/\/$/,'') + '/rest/v1/' + path, { headers:{ apikey:cfg.anonKey, Authorization:'Bearer ' + authSession.access_token, Prefer:'count=exact', Range:'0-0' } });
+    if(!r.ok) return null;
+    const n = parseInt((r.headers.get('content-range') || '').split('/')[1]);
+    return isNaN(n) ? null : n;
+  }catch(e){ return null; }
+}
+async function loadCreatorStats(){
+  const box = document.getElementById('creatorStatsBox');
+  if(!box) return;
+  box.innerHTML = loadingSpinnerHtml();
+  const cfg = loadSyncConfig();
+  const base = cfg.url.replace(/\/$/,'') + '/rest/v1/';
+  const h = { apikey:cfg.anonKey, Authorization:'Bearer ' + authSession.access_token };
+  const get = async (p) => { try{ const r = await fetch(base + p, { headers:h }); return r.ok ? await r.json() : null; }catch(e){ return null; } };
+  const [codes, backups, friends, msgs, records, dailySessions] = await Promise.all([
+    get('profile_codes?select=sync_key&limit=2000'),
+    get('backups?select=user_id,updated_at&limit=5000'),
+    creatorCount('friends?select=requester_key&status=eq.accepted'),
+    creatorCount('messages?select=id'),
+    get('exercise_records?select=exercise_name,profile_key&limit=5000'),
+    get('backups?select=sync_key,s:payload->sessions&sync_key=like.*_daily&limit=300')
+  ]);
+  const now = Date.now();
+  const accounts = codes ? new Set(codes.map(c=>c.sync_key)).size : null;
+  let active7 = null, active30 = null;
+  if(backups){
+    const last = {};
+    backups.forEach(b=>{ const t = Date.parse(b.updated_at); if(!(b.user_id in last) || t > last[b.user_id]) last[b.user_id] = t; });
+    active7 = Object.values(last).filter(t=>now-t < 7*864e5).length;
+    active30 = Object.values(last).filter(t=>now-t < 30*864e5).length;
+  }
+  let weekSessions = null;
+  if(dailySessions){
+    const cutoff = toLocalISO(new Date(now - 7*864e5));
+    weekSessions = 0;
+    dailySessions.forEach(r=>{ (Array.isArray(r.s) ? r.s : []).forEach(x=>{ if(x && x.date >= cutoff && x.entries && Object.keys(x.entries).length) weekSessions++; }); });
+  }
+  let top = [];
+  if(records){
+    const by = {};
+    records.forEach(r=>{ (by[r.exercise_name] = by[r.exercise_name] || new Set()).add(r.profile_key); });
+    top = Object.keys(by).map(k=>({ name:k, n:by[k].size })).sort((a,b)=>b.n-a.n).slice(0,5);
+  }
+  const v = x => x==null ? '—' : x;
+  box.innerHTML = '<div class="stat-row">'
+    + '<div class="stat-box"><div class="v">' + v(accounts) + '</div><div class="l">comptes</div></div>'
+    + '<div class="stat-box"><div class="v">' + v(active7) + '</div><div class="l">actifs 7 j</div></div>'
+    + '<div class="stat-box"><div class="v">' + v(active30) + '</div><div class="l">actifs 30 j</div></div></div>'
+    + '<div class="stat-row" style="margin-top:8px;">'
+    + '<div class="stat-box"><div class="v">' + v(weekSessions) + '</div><div class="l">séances / 7 j</div></div>'
+    + '<div class="stat-box"><div class="v">' + v(friends) + '</div><div class="l">amitiés</div></div>'
+    + '<div class="stat-box"><div class="v">' + v(msgs) + '</div><div class="l">messages</div></div></div>'
+    + (top.length ? '<div style="font-size:11px; color:var(--text-faint); text-transform:uppercase; margin:14px 0 6px;">Exercices les plus partagés</div>' + top.map(t=>'<div class="weight-log-row"><span class="d" style="flex:1;">' + escapeHtml(t.name) + '</span><span style="font-size:12px; color:var(--text-faint);">' + t.n + ' pers.</span></div>').join('') : '')
+    + (accounts == null ? '<div style="font-size:11px; color:var(--text-faint); margin-top:8px;">« — » : donnée non accessible avec tes droits Supabase actuels.</div>' : '');
+}
+async function creatorSendAnnouncement(){
+  const input = document.getElementById('creatorAnnounceInput');
+  const text = input ? input.value.trim() : '';
+  if(!text){ showToast("Écris ton annonce d'abord"); return; }
+  customConfirm("Envoyer cette annonce à tous les utilisateurs ?", async ()=>{
+    try{
+      await sendMessageRow({ type:'group', id:'_announcements' }, text, 'text', null);
+      input.value = '';
+      showToast("Annonce envoyée 📢");
+    }catch(e){ showToast("Envoi impossible : " + String(e.message).slice(0,80)); }
+  });
+}
+async function creatorViewAccount(key){
+  document.getElementById('leaderboardModalBg').classList.add('open');
+  await viewFriendProfile(key);
+}
+async function creatorExportAll(){
+  const out = document.getElementById('creatorExportOutput');
+  customConfirm("Télécharger les sauvegardes quotidiennes de tous les comptes ? Le fichier contient des données personnelles.", async ()=>{
+    if(out) out.textContent = 'Téléchargement…';
+    try{
+      const cfg = loadSyncConfig();
+      const r = await fetch(cfg.url.replace(/\/$/,'') + '/rest/v1/backups?select=sync_key,updated_at,payload&sync_key=like.*_daily&limit=300', { headers:{ apikey:cfg.anonKey, Authorization:'Bearer ' + authSession.access_token } });
+      if(!r.ok) throw new Error('HTTP ' + r.status);
+      const rows = await r.json();
+      const blob = new Blob([JSON.stringify({ exportedAt:new Date().toISOString(), accounts:rows }, null, 1)], { type:'application/json' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'ethrniity-export-' + todayISO() + '.json';
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(()=>URL.revokeObjectURL(a.href), 4000);
+      if(out) out.textContent = rows.length + ' compte(s) exporté(s).';
+    }catch(e){ if(out) out.textContent = 'Erreur : ' + e.message; }
+  });
+}
+// Animation d'accueil dorée, une fois par jour et par appareil
+let creatorWelcomeScheduled = false;
+function scheduleCreatorWelcome(){
+  if(creatorWelcomeScheduled) return;
+  if(localStorage.getItem('ethrniity-creator-welcome-date') === todayISO()) return;
+  creatorWelcomeScheduled = true;
+  let tries = 0;
+  const t = setInterval(()=>{
+    tries++;
+    const root = document.getElementById('app-root');
+    if(root && root.style.display === 'block'){ clearInterval(t); localStorage.setItem('ethrniity-creator-welcome-date', todayISO()); showCreatorWelcome(); }
+    else if(tries > 30) clearInterval(t);
+  }, 500);
+}
+function showCreatorWelcome(){
+  if(window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  const ov = document.createElement('div');
+  ov.className = 'creator-welcome';
+  let sparks = '';
+  for(let i=0;i<18;i++){
+    const a = Math.random()*360, d = 90 + Math.random()*140;
+    sparks += '<span style="--dx:' + Math.round(Math.cos(a*Math.PI/180)*d) + 'px; --dy:' + Math.round(Math.sin(a*Math.PI/180)*d) + 'px; animation-delay:' + (Math.random()*0.5).toFixed(2) + 's;"></span>';
+  }
+  ov.innerHTML = '<div class="cw-inner"><div class="cw-crown">👑</div><div class="cw-title">Bienvenue, Créateur</div>' + sparks + '</div>';
+  document.body.appendChild(ov);
+  setTimeout(()=>ov.remove(), 2600);
 }
 function loadCustomThemePacks(){
   try{ return JSON.parse(localStorage.getItem('ethrniity-custom-theme-packs') || '{}'); }
@@ -7522,7 +7700,6 @@ function renderProfil(){
     + '<button class="btn btn-secondary" style="width:100%; margin-top:8px;" onclick="joinLeagueFromForm()">+ Rejoindre cette ligue</button>'
     + (authSession ? renderPushNotifSection() : '')
     + '</div>';
-  if(creatorMode && authSession) html += creatorToolsHtml();
 
   el.innerHTML = html;
 }
@@ -8292,7 +8469,7 @@ async function openExerciseComparisonModal(exoId){
       html += '<div class="chart-wrap" style="height:' + Math.max(140, rows.length*38) + 'px;"><canvas id="exoCompareCanvas"></canvas></div>';
       rows.forEach((row,i)=>{
         const isMe = row.profile_key === myKey;
-        html += '<div class="weight-log-row" style="align-items:center;' + (isMe ? ' background:var(--surface-3); border-radius:8px; padding:8px 10px;' : '') + '">'
+        html += '<div class="weight-log-row" style="align-items:center;' + (isMe ? ' background:var(--surface-3); border-radius:8px; padding:8px 10px;' : '') + (isCreatorKey(row.profile_key) ? ' border-left:3px solid var(--gold); padding-left:8px;' : '') + '">'
           + '<span style="width:20px; color:var(--text-faint); font-family:\'SF Mono\',monospace;">' + (i+1) + '</span>'
           + avatarHtml({avatar:row.avatar, name:row.name}, 32)
           + '<span style="flex:1; margin-left:10px;">' + escapeHtml(row.name) + creatorBadgeHtml(row.profile_key) + (isMe ? ' <span style="color:var(--text-faint); font-size:11px;">(toi)</span>' : '') + '</span>'
@@ -8871,7 +9048,7 @@ function renderLeaderboardList(rows){
     rows.forEach((row,i)=>{
       const isMe = row.profile_key === authSession.user.id;
       const tier = RANK_TIERS.find(t=>t.name===row.rank_name) || RANK_TIERS[0];
-      html += '<div class="weight-log-row" style="align-items:center;' + (isMe ? ' background:var(--surface-3); border-radius:8px; padding:8px 10px;' : '') + '">'
+      html += '<div class="weight-log-row" style="align-items:center;' + (isMe ? ' background:var(--surface-3); border-radius:8px; padding:8px 10px;' : '') + (isCreatorKey(row.profile_key) ? ' border-left:3px solid var(--gold); padding-left:8px;' : '') + '">'
         + '<span style="width:20px; color:var(--text-faint); font-family:\'SF Mono\',monospace;">' + (i+1) + '</span>'
         + avatarHtml({avatar:row.avatar, name:row.name}, 32)
         + '<span style="flex:1; margin-left:10px;">' + escapeHtml(row.name) + creatorBadgeHtml(row.profile_key) + (isMe ? ' <span style="color:var(--text-faint); font-size:11px;">(toi)</span>' : '') + '</span>'
@@ -8968,7 +9145,7 @@ async function openWeeklyChallengeModal(){
     } else {
       rows.forEach((row,i)=>{
         const isMe = row.profile_key === authSession.user.id;
-        html += '<div class="weight-log-row" style="align-items:center;' + (isMe ? ' background:var(--surface-3); border-radius:8px; padding:8px 10px;' : '') + '">'
+        html += '<div class="weight-log-row" style="align-items:center;' + (isMe ? ' background:var(--surface-3); border-radius:8px; padding:8px 10px;' : '') + (isCreatorKey(row.profile_key) ? ' border-left:3px solid var(--gold); padding-left:8px;' : '') + '">'
           + '<span style="width:20px; color:var(--text-faint); font-family:\'SF Mono\',monospace;">' + (i===0?'🥇':i===1?'🥈':i===2?'🥉':(i+1)) + '</span>'
           + avatarHtml({avatar:row.avatar, name:row.name}, 32)
           + '<span style="flex:1; margin-left:10px;">' + escapeHtml(row.name) + creatorBadgeHtml(row.profile_key) + (isMe ? ' <span style="color:var(--text-faint); font-size:11px;">(toi)</span>' : '') + '</span>'
@@ -9021,7 +9198,7 @@ async function getAcceptedFriends(){
 }
 async function fetchRecentMessages(){
   const myKey = authSession.user.id;
-  const codes = loadSyncConfig().leaderboardCodes.map(c=>'"' + String(c).replace(/"/g,'') + '"');
+  const codes = loadSyncConfig().leaderboardCodes.concat(['_announcements']).map(c=>'"' + String(c).replace(/"/g,'') + '"');
   let cond = 'sender_key.eq.' + myKey + ',recipient_key.eq.' + myKey;
   if(codes.length) cond += ',group_code.in.(' + codes.join(',') + ')';
   const res = await fetch(chatUrl('messages?or=(' + encodeURIComponent(cond) + ')&order=created_at.desc&limit=300&select=*'), { headers:chatHeaders() });
@@ -9069,7 +9246,7 @@ async function openMessagesModal(){
     chatUnreadTotal = Object.values(unread).reduce((a,b)=>a+b,0);
     const lastByConv = {};
     msgs.forEach(m=>{ const id = convIdOfMessage(m, myKey); if(!lastByConv[id]) lastByConv[id] = m; });
-    const convs = [];
+    const convs = [{ type:'group', id:'_announcements', title:'📢 Annonces', key:'group:_announcements' }];
     loadSyncConfig().leaderboardCodes.forEach(c=>convs.push({ type:'group', id:c, title:'👥 ' + c, key:'group:' + c }));
     friends.forEach(f=>convs.push({ type:'dm', id:f.key, title:f.name, key:'dm:' + f.key }));
     convs.sort((a,b)=>{ const la = lastByConv[a.key], lb = lastByConv[b.key]; return (lb?lb.created_at:'') .localeCompare(la?la.created_at:''); });
@@ -9150,9 +9327,9 @@ async function openConversation(type, id, title){
     + '<div style="flex:1; font-weight:600; font-size:16px;">' + escapeHtml(title) + '</div>'
     + '<button class="del-btn" style="font-size:20px;" onclick="closeLeaderboardModal()">✕</button></div>'
     + '<div id="chatThread" style="max-height:50vh; overflow-y:auto; padding:2px;">' + loadingSpinnerHtml() + '</div>'
-    + '<div style="display:flex; gap:8px; margin-top:10px;">'
-    + '<input type="text" id="chatInput" placeholder="Écrire un message..." autocomplete="off" style="flex:1; min-width:0;" onkeydown="if(event.key===\'Enter\') sendChatText()">'
-    + '<button class="btn btn-add" onclick="sendChatText()">Envoyer</button></div>';
+    + (id==='_announcements' && !creatorMode ? '<div style="font-size:12px; color:var(--text-faint); margin-top:10px; text-align:center;">Canal en lecture seule.</div>' : '<div style="display:flex; gap:8px; margin-top:10px;">')
+    + (id==='_announcements' && !creatorMode ? '' : '<input type="text" id="chatInput" placeholder="Écrire un message..." autocomplete="off" style="flex:1; min-width:0;" onkeydown="if(event.key===\'Enter\') sendChatText()">'
+    + '<button class="btn btn-add" onclick="sendChatText()">Envoyer</button></div>');
   await refreshThread(true);
   chatPollTimer = setInterval(()=>{ if(activeConv && !document.hidden) refreshThread(false); }, 8000);
 }
@@ -9453,15 +9630,20 @@ function renderSideComparisonChart(){
 }
 
 function switchTab(viewName){
-  const buttons = [...document.querySelectorAll('nav.tabs button')];
+  if(viewName==='createur' && !creatorMode) viewName = 'seance';
+  const buttons = [...document.querySelectorAll('nav.tabs button')].filter(b=>b.style.display!=='none');
   buttons.forEach(b=>b.classList.toggle('active', b.dataset.view===viewName));
   const idx = buttons.findIndex(b=>b.dataset.view===viewName);
   const underline = document.getElementById('tabUnderline');
-  if(underline && idx>=0) underline.style.left = (idx*100/buttons.length) + '%';
+  if(underline){
+    underline.style.width = (100/buttons.length) + '%';
+    if(idx>=0) underline.style.left = (idx*100/buttons.length) + '%';
+  }
   document.querySelectorAll('.view').forEach(v=>v.classList.remove('active'));
   document.getElementById('view-'+viewName).classList.add('active');
   if(viewName==='stats') renderStats();
   if(viewName==='nutrition') renderNutrition();
+  if(viewName==='createur') renderCreatorView();
 }
 document.querySelectorAll('nav.tabs button').forEach(btn=>{
   btn.addEventListener('click', ()=> switchTab(btn.dataset.view));
