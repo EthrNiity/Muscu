@@ -892,6 +892,9 @@
   .chat-bubble-count{ position:absolute; top:-6px; right:-6px; min-width:16px; height:16px; padding:0 4px; box-sizing:border-box; border-radius:8px; background:var(--accent); color:#141517; font-size:10px; font-weight:700; line-height:16px; text-align:center; }
   @keyframes bubblePing{ 0%,100%{ box-shadow:0 0 0 0 rgba(var(--accent-rgb),0.45); } 50%{ box-shadow:0 0 0 6px rgba(var(--accent-rgb),0); } }
   @media (prefers-reduced-motion: reduce){ .chat-bubble-btn.has-unread{ animation:none; } }
+
+  .app-banner{ margin:8px 12px 0; padding:9px 12px; border:1px solid var(--border); border-radius:10px; background:var(--surface-2); font-size:13px; line-height:1.45; }
+  .user-badge{ display:inline-block; font-size:10px; font-weight:600; padding:1px 7px; border-radius:9px; background:var(--surface-3); border:1px solid var(--border); color:var(--text-dim); vertical-align:middle; cursor:default; }
 </style>
 </head>
 <body>
@@ -913,6 +916,7 @@
   </div>
   <div class="subline" id="todayLabel">—</div>
 </header>
+<div id="appBanners"></div>
 
 <main>
   <div id="view-seance" class="view active"></div>
@@ -1700,7 +1704,9 @@ function isCreatorKey(userId){
   return CREATOR_USER_IDS.indexOf(userId) !== -1;
 }
 function creatorBadgeHtml(userId){
-  return isCreatorKey(userId) ? ' <span class="creator-badge" title="Créateur de l’appli">👑 Créateur</span>' : '';
+  let h = isCreatorKey(userId) ? ' <span class="creator-badge" title="Créateur de l’appli">👑 Créateur</span>' : '';
+  try{ userBadges(userId).forEach(b=>{ h += ' <span class="user-badge">' + escapeHtml(b) + '</span>'; }); }catch(e){}
+  return h;
 }
 
 // ---------- Outils créateur (réservés au compte créateur, limités par les règles RLS) ----------
@@ -1809,6 +1815,454 @@ async function creatorPruneBackups(){
   creatorOut('Purge terminée : on garde les 10 sauvegardes datées les plus récentes + la sauvegarde quotidienne.');
 }
 
+// ---------- Console de debug locale (erreurs JS + requêtes en échec) ----------
+const DEBUG_LOG_KEY = 'ethrniity-debug-log';
+function readDebugLog(){ try{ return JSON.parse(localStorage.getItem(DEBUG_LOG_KEY) || '[]'); }catch(e){ return []; } }
+function logDebug(kind, msg){
+  try{
+    const l = readDebugLog();
+    l.push({ t:Date.now(), k:kind, m:String(msg).slice(0,300) });
+    localStorage.setItem(DEBUG_LOG_KEY, JSON.stringify(l.slice(-60)));
+  }catch(e){}
+}
+window.addEventListener('error', ev=>{ logDebug('js', (ev.message || 'erreur') + (ev.lineno ? ' (l.' + ev.lineno + ')' : '')); });
+window.addEventListener('unhandledrejection', ev=>{ logDebug('promesse', ev.reason && ev.reason.message ? ev.reason.message : ev.reason); });
+(function(){
+  const orig = window.fetch.bind(window);
+  window.fetch = function(input, init){
+    const url = typeof input === 'string' ? input : (input && input.url) || '';
+    const short = url.replace(/^https?:\/\/[^/]+/, '').slice(0, 90);
+    const method = (init && init.method) || 'GET';
+    return orig(input, init).then(res=>{
+      if(!res.ok && url.indexOf('supabase.co') !== -1) logDebug('http', res.status + ' ' + method + ' ' + short);
+      return res;
+    }, err=>{ if(url.indexOf('supabase.co') !== -1) logDebug('réseau', method + ' ' + short); throw err; });
+  };
+})();
+
+// ---------- Configuration globale de l'appli (table app_config) ----------
+let appConfig = (function(){ try{ return JSON.parse(localStorage.getItem('ethrniity-app-config') || '{}') || {}; }catch(e){ return {}; } })();
+function cfgGet(key, def){ return (appConfig[key] !== undefined && appConfig[key] !== null) ? appConfig[key] : def; }
+const FEATURE_FLAGS = [
+  ['chat','💬 Messagerie'], ['share','📤 Partage de séances / exercices'],
+  ['challenge','🎯 Défi de la semaine'], ['league','🏆 Classement général'], ['friends','🤝 Amis']
+];
+function featureOn(name){ const f = cfgGet('flags', {}); return f[name] !== false; }
+function featureBlocked(name){
+  if(featureOn(name) || creatorMode) return false;
+  showToast('Fonction temporairement désactivée');
+  return true;
+}
+function amIBlocked(){
+  const b = cfgGet('blocked', []);
+  return !!(authSession && Array.isArray(b) && b.indexOf(authSession.user.id) !== -1);
+}
+function appHttpHeaders(extra){
+  const c = loadSyncConfig();
+  return Object.assign({ apikey:c.anonKey, Authorization:'Bearer ' + (authSession ? authSession.access_token : c.anonKey) }, extra || {});
+}
+async function fetchAppConfig(){
+  try{
+    const c = loadSyncConfig();
+    const r = await fetch(c.url.replace(/\/$/,'') + '/rest/v1/app_config?select=key,value', { headers:appHttpHeaders() });
+    if(!r.ok) return false;
+    const o = {};
+    (await r.json()).forEach(x=>{ o[x.key] = x.value; });
+    appConfig = o;
+    try{ localStorage.setItem('ethrniity-app-config', JSON.stringify(o)); }catch(e){}
+    applyAppConfig();
+    return true;
+  }catch(e){ return false; }
+}
+async function creatorSetConfig(key, value){
+  const c = loadSyncConfig();
+  const r = await fetch(c.url.replace(/\/$/,'') + '/rest/v1/app_config', {
+    method:'POST',
+    headers:appHttpHeaders({ 'Content-Type':'application/json', Prefer:'resolution=merge-duplicates,return=minimal' }),
+    body: JSON.stringify({ key:key, value:value, updated_at:new Date().toISOString() })
+  });
+  if(!r.ok){
+    const t = await r.text();
+    throw new Error(r.status === 404 || /app_config/.test(t) ? "table app_config absente : exécute creator_setup.sql dans Supabase" : (r.status + ' ' + t.slice(0,80)));
+  }
+  appConfig[key] = value;
+  try{ localStorage.setItem('ethrniity-app-config', JSON.stringify(appConfig)); }catch(e){}
+  applyAppConfig();
+}
+function applyOfficialExercises(){
+  const list = cfgGet('official_exercises', []);
+  if(!Array.isArray(list)) return;
+  list.forEach(x=>{
+    if(!x || !x.name) return;
+    if(EXERCISE_LIBRARY.some(e=>normalizeStr(e.name) === normalizeStr(x.name))) return;
+    EXERCISE_LIBRARY.push({ name:x.name, group:x.group || 'Autre', type:x.type || 'Volume', official:true });
+  });
+}
+function applyAppConfig(){
+  try{ applyOfficialExercises(); }catch(e){}
+  try{ renderAppBanners(); }catch(e){}
+  try{ updateChatBubble(); }catch(e){}
+  try{ maybeShowWhatsNew(); }catch(e){}
+  try{ if(creatorMode && document.getElementById('view-createur') && document.getElementById('view-createur').classList.contains('active') && !creatorEditing()) renderCreatorView(); }catch(e){}
+}
+function creatorEditing(){
+  const a = document.activeElement;
+  return !!(a && a.closest && a.closest('#view-createur') && /INPUT|TEXTAREA|SELECT/.test(a.tagName));
+}
+function renderAppBanners(){
+  const box = document.getElementById('appBanners');
+  if(!box) return;
+  const loggedIn = !!authSession;
+  let html = '';
+  const m = cfgGet('maintenance', null);
+  if(m && m.on){
+    html += '<div class="app-banner" style="background:rgba(232,195,90,0.14); border-color:rgba(232,195,90,0.5);">🛠 ' + escapeHtml(m.message || 'Maintenance en cours : certaines fonctions peuvent être instables.') + (creatorMode ? ' <i style="opacity:0.7;">(visible par tous)</i>' : '') + '</div>';
+  }
+  if(loggedIn && amIBlocked()){
+    html += '<div class="app-banner" style="background:rgba(224,108,108,0.14); border-color:rgba(224,108,108,0.5);">🚫 Ta messagerie est suspendue par le créateur de l’appli.</div>';
+  }
+  const p = cfgGet('pinned', null);
+  if(loggedIn && p && p.text && p.id && localStorage.getItem('ethrniity-pinned-dismissed') !== String(p.id)){
+    html += '<div class="app-banner" style="display:flex; gap:8px; align-items:flex-start;"><span style="flex:1; min-width:0;">📌 ' + escapeHtml(p.text) + '</span>'
+      + '<button class="del-btn" style="font-size:16px; padding:0 4px;" onclick="dismissPinned()" aria-label="Masquer">✕</button></div>';
+  }
+  box.innerHTML = html;
+}
+function dismissPinned(){
+  const p = cfgGet('pinned', null);
+  if(p && p.id) localStorage.setItem('ethrniity-pinned-dismissed', String(p.id));
+  renderAppBanners();
+}
+function maybeShowWhatsNew(){
+  const w = cfgGet('whatsnew', null);
+  const root = document.getElementById('app-root');
+  if(!w || !w.id || !Array.isArray(w.items) || !w.items.length || !authSession) return;
+  if(!root || root.style.display !== 'block') return;
+  if(localStorage.getItem('ethrniity-whatsnew-seen') === String(w.id)) return;
+  if(document.getElementById('whatsNewOverlay')) return;
+  const ov = document.createElement('div');
+  ov.id = 'whatsNewOverlay';
+  ov.style.cssText = 'position:fixed; inset:0; z-index:9999; background:rgba(0,0,0,0.6); display:flex; align-items:center; justify-content:center; padding:16px;';
+  ov.innerHTML = '<div style="background:var(--surface); border:1px solid var(--border); border-radius:14px; max-width:420px; width:100%; max-height:80vh; overflow:auto; padding:18px;">'
+    + '<div style="font-size:12px; color:var(--accent); text-transform:uppercase; letter-spacing:0.06em;">Quoi de neuf ?</div>'
+    + '<h3 style="font-size:18px; margin:4px 0 12px;">' + escapeHtml(w.title || 'Nouveautés') + '</h3>'
+    + '<ul style="margin:0 0 14px 18px; padding:0; font-size:14px; line-height:1.6; color:var(--text);">' + w.items.map(i=>'<li>' + escapeHtml(i) + '</li>').join('') + '</ul>'
+    + '<button class="btn" style="width:100%;" onclick="closeWhatsNew()">C’est parti 💪</button></div>';
+  document.body.appendChild(ov);
+}
+function closeWhatsNew(){
+  const w = cfgGet('whatsnew', null);
+  if(w && w.id) localStorage.setItem('ethrniity-whatsnew-seen', String(w.id));
+  const ov = document.getElementById('whatsNewOverlay'); if(ov) ov.remove();
+}
+setInterval(()=>{ if(!document.hidden) fetchAppConfig(); }, 300000);
+document.addEventListener('visibilitychange', ()=>{ if(!document.hidden) fetchAppConfig(); });
+setTimeout(fetchAppConfig, 1500);
+let _bannerAuthState = null;
+setInterval(()=>{
+  const st = !!authSession;
+  if(st !== _bannerAuthState){ _bannerAuthState = st; try{ renderAppBanners(); }catch(e){} }
+  try{ maybeShowWhatsNew(); }catch(e){}
+}, 3000);
+
+// Défi de la semaine : le créateur peut forcer le type de défi
+function challengeForMonday(monday){
+  const o = cfgGet('challenge_override', null);
+  if(o && o.week === toLocalISO(monday)){
+    const t = CHALLENGE_TYPES.find(c=>c.key === o.key);
+    if(t) return t;
+  }
+  return CHALLENGE_TYPES[isoWeekNumber(monday) % CHALLENGE_TYPES.length];
+}
+
+// ---------- Cartes créateur : pilotage ----------
+function creatorMsg(id, html){ const el = document.getElementById(id); if(el) el.innerHTML = html; }
+async function creatorSave(key, value, okMsg){
+  try{ await creatorSetConfig(key, value); showToast(okMsg || 'Enregistré ✓'); return true; }
+  catch(e){ showToast(String(e.message).slice(0,110)); return false; }
+}
+function creatorControlHtml(){
+  const m = cfgGet('maintenance', {}) || {};
+  const p = cfgGet('pinned', null);
+  const w = cfgGet('whatsnew', null);
+  const flags = cfgGet('flags', {}) || {};
+  const ta = 'width:100%; background:var(--surface-3); border:1px solid var(--border); color:var(--text); border-radius:8px; padding:10px; font-size:14px; font-family:inherit; margin-top:6px;';
+  let html = '';
+  html += creatorCard('🛠 Mode maintenance',
+    '<div style="font-size:12px; color:var(--text-faint); line-height:1.5;">Affiche un bandeau en haut de l’appli pour tout le monde (l’appli reste utilisable).</div>'
+    + '<textarea id="creatorMaintMsg" rows="2" placeholder="Message du bandeau" style="' + ta + '">' + escapeHtml(m.message || '') + '</textarea>'
+    + '<button class="btn ' + (m.on ? '' : 'btn-add') + '" style="width:100%; margin-top:8px;" onclick="creatorToggleMaintenance()">' + (m.on ? '⏹ Désactiver la maintenance' : '▶ Activer la maintenance') + '</button>');
+  html += creatorCard('📌 Message épinglé',
+    '<div style="font-size:12px; color:var(--text-faint); line-height:1.5;">Reste en haut de l’appli chez tous les utilisateurs jusqu’à ce qu’ils le masquent (ou que tu le retires).</div>'
+    + '<textarea id="creatorPinnedText" rows="2" placeholder="Ex : Défi de groupe ce week-end !" style="' + ta + '">' + escapeHtml(p && p.text ? p.text : '') + '</textarea>'
+    + '<div style="display:flex; gap:8px; margin-top:8px;"><button class="btn btn-add" style="flex:1;" onclick="creatorSavePinned()">Épingler</button>'
+    + (p && p.text ? '<button class="btn btn-secondary" onclick="creatorClearPinned()">Retirer</button>' : '') + '</div>');
+  html += creatorCard('✨ « Quoi de neuf ? »',
+    '<div style="font-size:12px; color:var(--text-faint); line-height:1.5;">Fenêtre affichée une seule fois à chaque utilisateur à la prochaine ouverture. Une nouveauté par ligne.</div>'
+    + '<input id="creatorWnTitle" placeholder="Titre (ex : Version 2.4)" value="' + escapeHtml(w && w.title ? w.title : '') + '" style="' + ta + '">'
+    + '<textarea id="creatorWnItems" rows="4" placeholder="💬 Messagerie avec bulle de notifications&#10;👑 Espace créateur" style="' + ta + '">' + escapeHtml(w && w.items ? w.items.join('\n') : '') + '</textarea>'
+    + '<div style="display:flex; gap:8px; margin-top:8px;"><button class="btn btn-add" style="flex:1;" onclick="creatorPublishWhatsNew()">Publier</button>'
+    + '<button class="btn btn-secondary" onclick="creatorPreviewWhatsNew()">Aperçu</button>'
+    + (w ? '<button class="btn btn-secondary" onclick="creatorClearWhatsNew()">Retirer</button>' : '') + '</div>');
+  html += creatorCard('🎚 Fonctions activables',
+    '<div style="font-size:12px; color:var(--text-faint); margin-bottom:6px; line-height:1.5;">Désactive une fonction pour tout le monde sans redéployer (toi, tu y gardes accès).</div>'
+    + FEATURE_FLAGS.map(f=>{
+      const on = flags[f[0]] !== false;
+      return '<div class="weight-log-row" style="align-items:center;"><span class="d" style="flex:1;">' + f[1] + '</span>'
+        + '<button class="btn ' + (on ? '' : 'btn-secondary') + '" style="padding:5px 12px; font-size:12px;" onclick="creatorToggleFlag(\'' + f[0] + '\')">' + (on ? 'Activée' : 'Désactivée') + '</button></div>';
+    }).join(''));
+  const ov = cfgGet('challenge_override', null);
+  const curWeek = currentWeekStartISO();
+  const cur = ov && ov.week === curWeek ? ov.key : '';
+  html += creatorCard('🎯 Défi de la semaine',
+    '<div style="font-size:12px; color:var(--text-faint); margin-bottom:6px; line-height:1.5;">Force le type de défi de cette semaine pour toutes les ligues. Par défaut, il tourne automatiquement.</div>'
+    + '<select id="creatorChallengeSel" style="' + ta + '"><option value="">Automatique (' + escapeHtml(CHALLENGE_TYPES[isoWeekNumber(new Date()) % CHALLENGE_TYPES.length].label) + ')</option>'
+    + CHALLENGE_TYPES.map(c=>'<option value="' + c.key + '"' + (c.key === cur ? ' selected' : '') + '>' + escapeHtml(c.label) + '</option>').join('') + '</select>'
+    + '<button class="btn btn-add" style="width:100%; margin-top:8px;" onclick="creatorSaveChallenge()">Appliquer pour la semaine du ' + fmtShort(curWeek) + '</button>');
+  const groups = Array.from(new Set(EXERCISE_LIBRARY.map(e=>e.group))).sort();
+  const off = (cfgGet('official_exercises', []) || []);
+  html += creatorCard('🏋️ Exercices officiels',
+    '<div style="font-size:12px; color:var(--text-faint); margin-bottom:6px; line-height:1.5;">Ajoute des exercices à la bibliothèque de tout le monde.</div>'
+    + '<input id="creatorOffName" placeholder="Nom de l’exercice" style="' + ta + '">'
+    + '<div style="display:flex; gap:8px;"><select id="creatorOffGroup" style="' + ta + '">' + groups.map(g=>'<option>' + escapeHtml(g) + '</option>').join('') + '</select>'
+    + '<select id="creatorOffType" style="' + ta + '"><option>Force</option><option>Volume</option></select></div>'
+    + '<button class="btn btn-add" style="width:100%; margin-top:8px;" onclick="creatorAddOfficialExo()">Ajouter à la bibliothèque</button>'
+    + (off.length ? '<div style="margin-top:10px;">' + off.map((x,i)=>'<div class="weight-log-row" style="align-items:center;"><span class="d" style="flex:1;">' + escapeHtml(x.name) + ' <span style="color:var(--text-faint); font-size:11px;">· ' + escapeHtml(x.group || '') + '</span></span><button class="del-btn" onclick="creatorRemoveOfficialExo(' + i + ')">✕</button></div>').join('') + '</div>' : ''));
+  return html;
+}
+async function creatorToggleMaintenance(){
+  const m = cfgGet('maintenance', {}) || {};
+  const msg = (document.getElementById('creatorMaintMsg') || {}).value || '';
+  if(await creatorSave('maintenance', { on:!m.on, message:msg.trim() }, m.on ? 'Maintenance désactivée' : 'Maintenance activée')) renderCreatorView();
+}
+async function creatorSavePinned(){
+  const t = (document.getElementById('creatorPinnedText').value || '').trim();
+  if(!t){ showToast('Écris un message'); return; }
+  if(await creatorSave('pinned', { id:Date.now(), text:t }, 'Message épinglé 📌')) renderCreatorView();
+}
+async function creatorClearPinned(){ if(await creatorSave('pinned', null, 'Message retiré')) renderCreatorView(); }
+function creatorReadWn(){
+  const items = (document.getElementById('creatorWnItems').value || '').split('\n').map(s=>s.trim()).filter(Boolean);
+  return { title:(document.getElementById('creatorWnTitle').value || '').trim() || 'Nouveautés', items:items };
+}
+async function creatorPublishWhatsNew(){
+  const w = creatorReadWn();
+  if(!w.items.length){ showToast('Ajoute au moins une ligne'); return; }
+  localStorage.removeItem('ethrniity-whatsnew-seen');
+  if(await creatorSave('whatsnew', { id:String(Date.now()), title:w.title, items:w.items }, 'Publié ✨')) renderCreatorView();
+}
+function creatorPreviewWhatsNew(){
+  const w = creatorReadWn();
+  if(!w.items.length){ showToast('Ajoute au moins une ligne'); return; }
+  const prev = appConfig.whatsnew, prevSeen = localStorage.getItem('ethrniity-whatsnew-seen');
+  appConfig.whatsnew = { id:'preview-' + Date.now(), title:w.title, items:w.items };
+  localStorage.removeItem('ethrniity-whatsnew-seen');
+  maybeShowWhatsNew();
+  appConfig.whatsnew = prev;
+  if(prevSeen) localStorage.setItem('ethrniity-whatsnew-seen', prevSeen);
+  const ov = document.getElementById('whatsNewOverlay');
+  if(ov){ const b = ov.querySelector('button'); if(b) b.onclick = ()=>ov.remove(); }
+}
+async function creatorClearWhatsNew(){ if(await creatorSave('whatsnew', null, 'Retiré')) renderCreatorView(); }
+async function creatorToggleFlag(name){
+  const f = Object.assign({}, cfgGet('flags', {}));
+  f[name] = f[name] === false;
+  if(await creatorSave('flags', f, f[name] === false ? 'Fonction désactivée' : 'Fonction activée')) renderCreatorView();
+}
+async function creatorSaveChallenge(){
+  const key = document.getElementById('creatorChallengeSel').value;
+  const v = key ? { week:currentWeekStartISO(), key:key } : null;
+  if(await creatorSave('challenge_override', v, key ? 'Défi imposé' : 'Défi automatique')) renderCreatorView();
+}
+async function creatorAddOfficialExo(){
+  const name = (document.getElementById('creatorOffName').value || '').trim();
+  if(!name){ showToast('Donne un nom à l’exercice'); return; }
+  const list = (cfgGet('official_exercises', []) || []).slice();
+  if(list.some(x=>normalizeStr(x.name) === normalizeStr(name)) || EXERCISE_LIBRARY.some(x=>normalizeStr(x.name) === normalizeStr(name))){ showToast('Cet exercice existe déjà'); return; }
+  list.push({ name:name, group:document.getElementById('creatorOffGroup').value, type:document.getElementById('creatorOffType').value });
+  if(await creatorSave('official_exercises', list, 'Exercice ajouté')) renderCreatorView();
+}
+async function creatorRemoveOfficialExo(i){
+  const list = (cfgGet('official_exercises', []) || []).slice();
+  const [x] = list.splice(i, 1);
+  if(await creatorSave('official_exercises', list, 'Retiré')){
+    if(x){ const idx = EXERCISE_LIBRARY.findIndex(e=>e.official && e.name === x.name); if(idx >= 0) EXERCISE_LIBRARY.splice(idx, 1); }
+    renderCreatorView();
+  }
+}
+
+// ---------- Cartes créateur : suivi, santé, modération ----------
+function daysAgoLabel(t){ const d = Math.floor((Date.now() - t) / 864e5); return d <= 0 ? 'aujourd’hui' : 'il y a ' + d + ' j'; }
+async function creatorLoadAccountsMeta(){
+  const base = loadSyncConfig().url.replace(/\/$/,'') + '/rest/v1/';
+  const get = async p => { try{ const r = await fetch(base + p, { headers:appHttpHeaders() }); return r.ok ? await r.json() : null; }catch(e){ return null; } };
+  const [codes, backups] = await Promise.all([ get('profile_codes?select=sync_key,name,friend_code&limit=2000'), get('backups?select=user_id,sync_key,updated_at&limit=5000') ]);
+  const names = {}, last = {};
+  (codes || []).forEach(c=>{ if(!names[c.sync_key]) names[c.sync_key] = c.name; });
+  (backups || []).forEach(b=>{ const t = Date.parse(b.updated_at); if(!(b.user_id in last) || t > last[b.user_id]) last[b.user_id] = t; });
+  return { codes:codes, backups:backups, names:names, last:last };
+}
+async function creatorLoadInactive(){
+  const box = document.getElementById('creatorInactiveBox');
+  box.innerHTML = loadingSpinnerHtml();
+  const m = await creatorLoadAccountsMeta();
+  if(!m.backups){ box.innerHTML = 'Données inaccessibles (droits admin Supabase ?).'; return; }
+  const list = Object.keys(m.last).filter(k=>Date.now() - m.last[k] > 30*864e5 && k !== authSession.user.id).sort((a,b)=>m.last[a] - m.last[b]);
+  window._creatorInactive = list;
+  if(!list.length){ box.innerHTML = 'Aucun compte inactif depuis 30 jours 🎉'; return; }
+  box.innerHTML = list.map(k=>'<div class="weight-log-row" style="align-items:center;"><span class="d" style="flex:1; min-width:0;">' + escapeHtml(m.names[k] || 'Sans nom') + '<div style="font-size:11px; color:var(--text-faint);">dernière activité ' + daysAgoLabel(m.last[k]) + '</div></span>'
+    + '<button class="btn btn-secondary" style="padding:5px 10px; font-size:12px;" onclick="creatorNudge(\'' + k + '\')">Relancer</button></div>').join('')
+    + '<button class="btn btn-secondary" style="width:100%; margin-top:8px;" onclick="creatorNudgeAll()">Relancer les ' + list.length + ' comptes</button>';
+}
+const NUDGE_TEXT = 'Salut ! Ça fait un moment qu’on ne t’a pas vu sur EthrNiity 💪 Une petite séance pour reprendre ?';
+function creatorNudge(key){
+  customConfirm('Envoyer un message de relance à ce compte ?', async ()=>{
+    try{ await sendMessageRow({ type:'dm', id:key }, NUDGE_TEXT, 'text', null); showToast('Relance envoyée'); }
+    catch(e){ showToast('Échec : ' + String(e.message).slice(0,80)); }
+  });
+}
+function creatorNudgeAll(){
+  const list = window._creatorInactive || [];
+  customConfirm('Envoyer une relance à ' + list.length + ' compte(s) inactif(s) ?', async ()=>{
+    let ok = 0;
+    for(const k of list){ try{ await sendMessageRow({ type:'dm', id:k }, NUDGE_TEXT, 'text', null); ok++; }catch(e){} }
+    showToast(ok + ' relance(s) envoyée(s)');
+  });
+}
+async function creatorLoadHealth(){
+  const box = document.getElementById('creatorHealthBox');
+  box.innerHTML = loadingSpinnerHtml();
+  const base = loadSyncConfig().url.replace(/\/$/,'') + '/rest/v1/';
+  const get = async p => { try{ const r = await fetch(base + p, { headers:appHttpHeaders() }); return r.ok ? await r.json() : null; }catch(e){ return null; } };
+  const [codes, daily, anyBackups] = await Promise.all([
+    get('profile_codes?select=sync_key,friend_code,name&limit=2000'),
+    get('backups?select=sync_key,user_id,n:payload->sessions&sync_key=like.*_daily&limit=300'),
+    get('backups?select=user_id&limit=5000')
+  ]);
+  if(!codes || !daily){ box.innerHTML = 'Données inaccessibles (droits admin Supabase ?).'; return; }
+  const byKey = {}; codes.forEach(c=>{ (byKey[c.sync_key] = byKey[c.sync_key] || []).push(c); });
+  const issues = [];
+  Object.keys(byKey).filter(k=>byKey[k].length > 1).forEach(k=>issues.push('🔑 ' + escapeHtml(byKey[k][0].name || k.slice(0,8)) + ' : ' + byKey[k].length + ' codes amis'));
+  const dailyUsers = new Set(daily.map(d=>d.user_id));
+  const withBackup = new Set((anyBackups || []).map(b=>b.user_id));
+  withBackup.forEach(u=>{ if(!byKey[u]) issues.push('❓ Compte ' + escapeHtml(u.slice(0,8)) + '… : sauvegardes mais aucun code ami'); if(!dailyUsers.has(u)) issues.push('💾 Compte ' + escapeHtml(((byKey[u] || [{}])[0].name) || u.slice(0,8)) + ' : pas de sauvegarde quotidienne'); });
+  daily.forEach(d=>{ if(!Array.isArray(d.n) || !d.n.length) issues.push('🕳 ' + escapeHtml(((byKey[d.user_id] || [{}])[0].name) || d.user_id.slice(0,8)) + ' : sauvegarde sans aucune séance'); });
+  box.innerHTML = '<div style="margin-bottom:6px;">' + codes.length + ' code(s) · ' + Object.keys(byKey).length + ' compte(s) · ' + daily.length + ' sauvegarde(s) quotidienne(s)</div>'
+    + (issues.length ? issues.slice(0,30).map(i=>'<div class="weight-log-row"><span class="d">' + i + '</span></div>').join('') + (issues.length > 30 ? '<div style="font-size:11px; color:var(--text-faint);">… et ' + (issues.length - 30) + ' autre(s)</div>' : '')
+      + (issues.some(i=>i.indexOf('🔑') === 0) ? '<button class="btn btn-secondary" style="width:100%; margin-top:8px;" onclick="creatorCleanAllFriendCodes()">🧼 Réparer les codes en double</button>' : '')
+      : '<div style="color:var(--green,#7fd38a);">✓ Aucune anomalie détectée</div>');
+}
+async function creatorLoadModeration(){
+  const box = document.getElementById('creatorModBox');
+  box.innerHTML = loadingSpinnerHtml();
+  try{
+    const r = await fetch(chatUrl('messages?select=id,created_at,sender_key,sender_name,recipient_key,group_code,body,kind&order=created_at.desc&limit=60'), { headers:chatHeaders() });
+    if(!r.ok) throw new Error('HTTP ' + r.status);
+    const rows = await r.json();
+    const blocked = cfgGet('blocked', []) || [];
+    window._creatorModRows = rows;
+    box.innerHTML = (blocked.length ? '<div style="font-size:11px; color:var(--text-faint); text-transform:uppercase; margin-bottom:4px;">Comptes bloqués</div>' + blocked.map(k=>'<div class="weight-log-row" style="align-items:center;"><span class="d" style="flex:1; font-family:monospace; font-size:11px;">' + escapeHtml(k) + '</span><button class="btn btn-secondary" style="padding:4px 10px; font-size:12px;" onclick="creatorToggleBlock(\'' + k + '\')">Débloquer</button></div>').join('') + '<div style="height:10px;"></div>' : '')
+      + (rows.length ? rows.map((m,i)=>{
+        const dest = m.group_code ? (m.group_code === '_announcements' ? 'annonce' : 'groupe ' + escapeHtml(m.group_code)) : 'privé';
+        const body = m.kind === 'text' ? escapeHtml((m.body || '').slice(0,140)) : '<i>[' + escapeHtml(m.kind) + ']</i> ' + escapeHtml((m.body || '').slice(0,80));
+        return '<div class="weight-log-row" style="align-items:flex-start; gap:8px;"><span style="flex:1; min-width:0; font-size:13px;"><b>' + escapeHtml(m.sender_name || 'Inconnu') + '</b> <span style="font-size:11px; color:var(--text-faint);">→ ' + dest + ' · ' + new Date(m.created_at).toLocaleString('fr-FR', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' }) + '</span><div style="word-break:break-word;">' + body + '</div></span>'
+          + '<span style="display:flex; flex-direction:column; gap:4px;"><button class="del-btn" onclick="creatorDeleteMessage(' + i + ')" aria-label="Supprimer">🗑</button>'
+          + (m.sender_key !== authSession.user.id ? '<button class="del-btn" style="font-size:13px;" onclick="creatorToggleBlock(\'' + m.sender_key + '\')" aria-label="Bloquer">🚫</button>' : '') + '</span></div>';
+      }).join('') : 'Aucun message.')
+      + '<div style="font-size:11px; color:var(--text-faint); margin-top:6px;">🗑 supprime le message · 🚫 bloque l’envoi de messages de ce compte.</div>';
+  }catch(e){ box.innerHTML = 'Erreur : ' + escapeHtml(e.message) + ' (table messages ou droits admin manquants ? exécute creator_setup.sql).'; }
+}
+function creatorDeleteMessage(i){
+  const m = (window._creatorModRows || [])[i]; if(!m) return;
+  customConfirm('Supprimer définitivement ce message ?', async ()=>{
+    try{
+      const r = await fetch(chatUrl('messages?id=eq.' + encodeURIComponent(m.id)), { method:'DELETE', headers:chatHeaders({ Prefer:'return=representation' }) });
+      if(!r.ok) throw new Error('HTTP ' + r.status);
+      if(!(await r.json()).length) throw new Error('refusé (policy admin delete manquante)');
+      showToast('Message supprimé'); creatorLoadModeration();
+    }catch(e){ showToast('Échec : ' + String(e.message).slice(0,80)); }
+  });
+}
+function creatorToggleBlock(key){
+  const b = (cfgGet('blocked', []) || []).slice();
+  const i = b.indexOf(key);
+  customConfirm(i === -1 ? 'Bloquer l’envoi de messages de ce compte ?' : 'Débloquer ce compte ?', async ()=>{
+    if(i === -1) b.push(key); else b.splice(i, 1);
+    if(await creatorSave('blocked', b, i === -1 ? 'Compte bloqué' : 'Compte débloqué')) creatorLoadModeration();
+  });
+}
+// Badges attribuables
+function userBadges(uid){ const b = cfgGet('badges', {}) || {}; return Array.isArray(b[uid]) ? b[uid] : []; }
+async function creatorLoadBadges(){
+  const box = document.getElementById('creatorBadgesBox');
+  box.innerHTML = loadingSpinnerHtml();
+  try{
+    const by = await creatorFetchAllCodes();
+    const keys = Object.keys(by).sort((a,b)=>(by[a][0].name || '').localeCompare(by[b][0].name || ''));
+    const all = cfgGet('badges', {}) || {};
+    const ta = 'background:var(--surface-3); border:1px solid var(--border); color:var(--text); border-radius:8px; padding:9px 10px; font-size:14px; font-family:inherit;';
+    box.innerHTML = '<select id="creatorBadgeUser" style="width:100%; ' + ta + '">' + keys.map(k=>'<option value="' + k + '">' + escapeHtml(by[k][0].name || 'Sans nom') + '</option>').join('') + '</select>'
+      + '<div style="display:flex; gap:8px; margin-top:8px;"><input id="creatorBadgeLabel" maxlength="24" placeholder="Ex : 🧪 Bêta-testeur" style="flex:1; min-width:0; ' + ta + '"><button class="btn btn-add" onclick="creatorAddBadge()">Donner</button></div>'
+      + Object.keys(all).filter(k=>all[k] && all[k].length).map(k=>'<div class="weight-log-row" style="align-items:center; flex-wrap:wrap; gap:6px;"><span class="d" style="min-width:90px;">' + escapeHtml((by[k] || [{}])[0].name || k.slice(0,8)) + '</span>'
+        + all[k].map((b,i)=>'<span class="user-badge" onclick="creatorRemoveBadge(\'' + k + '\',' + i + ')" title="Retirer">' + escapeHtml(b) + ' ✕</span>').join('') + '</div>').join('');
+  }catch(e){ box.innerHTML = 'Erreur : ' + escapeHtml(e.message); }
+}
+async function creatorAddBadge(){
+  const uid = document.getElementById('creatorBadgeUser').value;
+  const label = (document.getElementById('creatorBadgeLabel').value || '').trim();
+  if(!uid || !label){ showToast('Choisis un compte et un badge'); return; }
+  const all = JSON.parse(JSON.stringify(cfgGet('badges', {}) || {}));
+  all[uid] = (all[uid] || []).concat([label]).slice(0,4);
+  if(await creatorSave('badges', all, 'Badge attribué 🏅')) creatorLoadBadges();
+}
+async function creatorRemoveBadge(uid, i){
+  const all = JSON.parse(JSON.stringify(cfgGet('badges', {}) || {}));
+  if(!all[uid]) return;
+  all[uid].splice(i, 1);
+  if(await creatorSave('badges', all, 'Badge retiré')) creatorLoadBadges();
+}
+// Console de debug
+function creatorDebugHtml(){
+  const l = readDebugLog().slice().reverse();
+  if(!l.length) return '<div style="color:var(--green,#7fd38a);">✓ Aucune erreur enregistrée sur cet appareil.</div>';
+  return l.slice(0,25).map(x=>'<div style="font-size:11px; font-family:monospace; padding:4px 0; border-bottom:1px solid var(--border); word-break:break-word;"><span style="color:var(--text-faint);">' + new Date(x.t).toLocaleTimeString('fr-FR') + '</span> <b style="color:var(--accent);">' + escapeHtml(x.k) + '</b> ' + escapeHtml(x.m) + '</div>').join('');
+}
+function creatorRefreshDebug(){ const b = document.getElementById('creatorDebugBox'); if(b) b.innerHTML = creatorDebugHtml(); }
+function creatorClearDebug(){ localStorage.removeItem(DEBUG_LOG_KEY); creatorRefreshDebug(); }
+function creatorCopyDebug(){
+  const txt = readDebugLog().map(x=>new Date(x.t).toISOString() + ' [' + x.k + '] ' + x.m).join('\n') + '\n\nUA: ' + navigator.userAgent;
+  if(navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(txt).then(()=>showToast('Journal copié'), ()=>showToast('Copie impossible'));
+}
+// Aperçu « comme un utilisateur »
+function creatorStartPreview(){
+  creatorMode = false;
+  try{ applyCustomColors(); }catch(e){}
+  try{ updateCreatorTab(); }catch(e){}
+  const pill = document.createElement('button');
+  pill.id = 'creatorPreviewPill';
+  pill.className = 'btn';
+  pill.style.cssText = 'position:fixed; left:50%; transform:translateX(-50%); bottom:84px; z-index:9998; padding:8px 16px; font-size:12px; box-shadow:0 4px 16px rgba(0,0,0,0.5);';
+  pill.textContent = '👑 Quitter l’aperçu utilisateur';
+  pill.onclick = ()=>{ pill.remove(); detectCreator().then(()=>{ creatorMode = true; try{ applyCustomColors(); updateCreatorTab(); switchTab('createur'); }catch(e){} }); };
+  document.body.appendChild(pill);
+  switchTab('seance');
+  showToast('Aperçu : tu vois l’appli comme un utilisateur');
+}
+function creatorActivityChartHtml(perDay, signups){
+  const maxD = Math.max(1, ...perDay.map(d=>d.n));
+  let html = '<div style="font-size:11px; color:var(--text-faint); text-transform:uppercase; margin:14px 0 6px;">Séances par jour (14 j)</div>'
+    + '<div style="display:flex; align-items:flex-end; gap:3px; height:70px;">'
+    + perDay.map(d=>'<div title="' + d.label + ' : ' + d.n + ' séance(s), ' + d.u + ' actif(s)" style="flex:1; min-width:0; display:flex; flex-direction:column; justify-content:flex-end; height:100%;"><div style="height:' + Math.max(d.n ? 6 : 2, Math.round(d.n / maxD * 100)) + '%; background:' + (d.n ? 'var(--accent)' : 'var(--border)') + '; border-radius:3px 3px 0 0;"></div></div>').join('') + '</div>'
+    + '<div style="display:flex; justify-content:space-between; font-size:10px; color:var(--text-faint); margin-top:2px;"><span>' + perDay[0].label + '</span><span>' + perDay[perDay.length-1].label + '</span></div>';
+  if(signups){
+    const maxS = Math.max(1, ...signups.map(s=>s.n));
+    html += '<div style="font-size:11px; color:var(--text-faint); text-transform:uppercase; margin:14px 0 6px;">Nouveaux comptes (8 sem.)</div>'
+      + '<div style="display:flex; align-items:flex-end; gap:6px; height:54px;">'
+      + signups.map(s=>'<div title="sem. du ' + s.label + ' : ' + s.n + '" style="flex:1; display:flex; flex-direction:column; justify-content:flex-end; align-items:center; height:100%; font-size:10px; color:var(--text-faint);">' + (s.n || '') + '<div style="width:100%; height:' + Math.max(s.n ? 6 : 2, Math.round(s.n / maxS * 80)) + '%; background:' + (s.n ? 'var(--gold)' : 'var(--border)') + '; border-radius:3px 3px 0 0;"></div></div>').join('') + '</div>';
+  }
+  return html;
+}
+
 // ---------- Onglet Créateur ----------
 function creatorCard(title, inner){
   return '<div class="card"><h2 class="section-title">' + title + '</h2>' + inner + '</div>';
@@ -1832,13 +2286,37 @@ function renderCreatorView(){
   html += creatorCard('👥 Comptes',
     '<div id="creatorAccountsBox" style="font-size:13px;"></div>'
     + '<button class="btn btn-secondary" style="width:100%; margin-top:8px;" onclick="creatorListAccounts()">Charger les comptes</button>');
+  html += creatorControlHtml();
+  html += creatorCard('😴 Comptes inactifs (30 j)',
+    '<div id="creatorInactiveBox" style="font-size:13px;">Charge la liste pour relancer ceux qui ne reviennent plus.</div>'
+    + '<button class="btn btn-secondary" style="width:100%; margin-top:8px;" onclick="creatorLoadInactive()">Charger</button>');
+  html += creatorCard('🩺 Santé des données',
+    '<div id="creatorHealthBox" style="font-size:13px;">Détecte doublons de codes, comptes sans code ou sans sauvegarde, sauvegardes vides.</div>'
+    + '<button class="btn btn-secondary" style="width:100%; margin-top:8px;" onclick="creatorLoadHealth()">Analyser</button>');
+  html += creatorCard('🛡 Modération',
+    '<div id="creatorModBox" style="font-size:13px;">Derniers messages de toute l’appli, avec suppression et blocage.</div>'
+    + '<button class="btn btn-secondary" style="width:100%; margin-top:8px;" onclick="creatorLoadModeration()">Charger les messages</button>');
+  html += creatorCard('🏅 Badges',
+    '<div id="creatorBadgesBox" style="font-size:13px;">Donne un badge visible à côté du nom d’un utilisateur (classements, amis).</div>'
+    + '<button class="btn btn-secondary" style="width:100%; margin-top:8px;" onclick="creatorLoadBadges()">Gérer les badges</button>');
   html += creatorToolsHtml();
+  html += creatorCard('🐞 Console de debug',
+    '<div style="font-size:12px; color:var(--text-faint); margin-bottom:6px;">Erreurs JS et requêtes Supabase en échec sur cet appareil (60 dernières).</div>'
+    + '<div id="creatorDebugBox">' + creatorDebugHtml() + '</div>'
+    + '<div style="display:flex; gap:8px; margin-top:8px;"><button class="btn btn-secondary" style="flex:1;" onclick="creatorRefreshDebug()">↻</button><button class="btn btn-secondary" style="flex:1;" onclick="creatorCopyDebug()">Copier</button><button class="btn btn-secondary" style="flex:1;" onclick="creatorClearDebug()">Vider</button></div>');
+  html += creatorCard('🔬 Aperçu utilisateur',
+    '<div style="font-size:12px; color:var(--text-faint); margin-bottom:8px; line-height:1.5;">Masque temporairement le thème et l’onglet Créateur pour voir l’appli exactement comme tes utilisateurs.</div>'
+    + '<button class="btn btn-secondary" style="width:100%;" onclick="creatorStartPreview()">Voir comme un utilisateur</button>');
+  const lastExp = parseInt(localStorage.getItem('ethrniity-creator-last-export') || '0');
+  const expAge = lastExp ? Math.floor((Date.now() - lastExp) / 864e5) : null;
   html += creatorCard('📦 Export',
     '<div style="font-size:12px; color:var(--text-faint); margin-bottom:8px; line-height:1.5;">Télécharge la sauvegarde quotidienne de tous les comptes dans un seul fichier JSON (contient des données personnelles : à garder pour toi).</div>'
+    + '<div style="font-size:12px; margin-bottom:8px; color:' + (expAge === null || expAge > 7 ? 'var(--gold)' : 'var(--text-dim)') + ';">' + (expAge === null ? '⚠️ Aucun export effectué sur cet appareil.' : (expAge > 7 ? '⚠️ ' : '✓ ') + 'Dernier export : ' + (expAge === 0 ? 'aujourd’hui' : 'il y a ' + expAge + ' j') + (expAge > 7 ? ' — pense à en faire un (rappel hebdo).' : '.')) + '</div>'
     + '<button class="btn btn-secondary" style="width:100%;" onclick="creatorExportAll()">Exporter toutes les sauvegardes</button>'
     + '<div id="creatorExportOutput" style="margin-top:8px; font-size:12px; color:var(--text-dim);"></div>');
   el.innerHTML = html;
-  loadCreatorStats();
+  if(window._creatorStatsHtml && Date.now() - (window._creatorStatsAt || 0) < 90000){ const b = document.getElementById('creatorStatsBox'); if(b) b.innerHTML = window._creatorStatsHtml; }
+  else loadCreatorStats();
 }
 async function creatorCount(path){
   const cfg = loadSyncConfig();
@@ -1857,14 +2335,15 @@ async function loadCreatorStats(){
   const base = cfg.url.replace(/\/$/,'') + '/rest/v1/';
   const h = { apikey:cfg.anonKey, Authorization:'Bearer ' + authSession.access_token };
   const get = async (p) => { try{ const r = await fetch(base + p, { headers:h }); return r.ok ? await r.json() : null; }catch(e){ return null; } };
-  const [codes, backups, friends, msgs, records, dailySessions] = await Promise.all([
-    get('profile_codes?select=sync_key&limit=2000'),
+  const [codesWithDate, backups, friends, msgs, records, dailySessions] = await Promise.all([
+    get('profile_codes?select=sync_key,created_at&limit=2000'),
     get('backups?select=user_id,updated_at&limit=5000'),
     creatorCount('friends?select=requester_key&status=eq.accepted'),
     creatorCount('messages?select=id'),
     get('exercise_records?select=exercise_name,profile_key&limit=5000'),
     get('backups?select=sync_key,s:payload->sessions&sync_key=like.*_daily&limit=300')
   ]);
+  const codes = codesWithDate || await get('profile_codes?select=sync_key&limit=2000');
   const now = Date.now();
   const accounts = codes ? new Set(codes.map(c=>c.sync_key)).size : null;
   let active7 = null, active30 = null;
@@ -1875,6 +2354,22 @@ async function loadCreatorStats(){
     active30 = Object.values(last).filter(t=>now-t < 30*864e5).length;
   }
   let weekSessions = null;
+  const perDay = [];
+  for(let i = 13; i >= 0; i--){ const d = new Date(now - i*864e5); perDay.push({ iso:toLocalISO(d), label:String(d.getDate()).padStart(2,'0') + '/' + String(d.getMonth()+1).padStart(2,'0'), n:0, users:new Set(), u:0 }); }
+  if(dailySessions){
+    dailySessions.forEach(r=>{ (Array.isArray(r.s) ? r.s : []).forEach(x=>{ if(!x || !x.entries || !Object.keys(x.entries).length) return; const slot = perDay.find(p=>p.iso === x.date); if(slot){ slot.n++; slot.users.add(r.sync_key); } }); });
+    perDay.forEach(p=>{ p.u = p.users.size; });
+  }
+  let signups = null;
+  if(codesWithDate){
+    const firstByKey = {};
+    codesWithDate.forEach(c=>{ const t = Date.parse(c.created_at); if(!isNaN(t) && (!(c.sync_key in firstByKey) || t < firstByKey[c.sync_key])) firstByKey[c.sync_key] = t; });
+    signups = [];
+    for(let i = 7; i >= 0; i--){
+      const start = new Date(now - i*7*864e5), end = new Date(now - (i-1)*7*864e5);
+      signups.push({ label:String(start.getDate()).padStart(2,'0') + '/' + String(start.getMonth()+1).padStart(2,'0'), n:Object.values(firstByKey).filter(t=>t >= start.getTime() && t < end.getTime()).length });
+    }
+  }
   if(dailySessions){
     const cutoff = toLocalISO(new Date(now - 7*864e5));
     weekSessions = 0;
@@ -1887,7 +2382,7 @@ async function loadCreatorStats(){
     top = Object.keys(by).map(k=>({ name:k, n:by[k].size })).sort((a,b)=>b.n-a.n).slice(0,5);
   }
   const v = x => x==null ? '—' : x;
-  box.innerHTML = '<div class="stat-row">'
+  const statsHtml = '<div class="stat-row">'
     + '<div class="stat-box"><div class="v">' + v(accounts) + '</div><div class="l">comptes</div></div>'
     + '<div class="stat-box"><div class="v">' + v(active7) + '</div><div class="l">actifs 7 j</div></div>'
     + '<div class="stat-box"><div class="v">' + v(active30) + '</div><div class="l">actifs 30 j</div></div></div>'
@@ -1896,7 +2391,10 @@ async function loadCreatorStats(){
     + '<div class="stat-box"><div class="v">' + v(friends) + '</div><div class="l">amitiés</div></div>'
     + '<div class="stat-box"><div class="v">' + v(msgs) + '</div><div class="l">messages</div></div></div>'
     + (top.length ? '<div style="font-size:11px; color:var(--text-faint); text-transform:uppercase; margin:14px 0 6px;">Exercices les plus partagés</div>' + top.map(t=>'<div class="weight-log-row"><span class="d" style="flex:1;">' + escapeHtml(t.name) + '</span><span style="font-size:12px; color:var(--text-faint);">' + t.n + ' pers.</span></div>').join('') : '')
+    + (dailySessions ? creatorActivityChartHtml(perDay, signups) : '')
     + (accounts == null ? '<div style="font-size:11px; color:var(--text-faint); margin-top:8px;">« — » : donnée non accessible avec tes droits Supabase actuels.</div>' : '');
+  window._creatorStatsHtml = statsHtml; window._creatorStatsAt = Date.now();
+  const b2 = document.getElementById('creatorStatsBox'); if(b2) b2.innerHTML = statsHtml;
 }
 async function creatorSendAnnouncement(){
   const input = document.getElementById('creatorAnnounceInput');
@@ -1929,6 +2427,7 @@ async function creatorExportAll(){
       a.download = 'ethrniity-export-' + todayISO() + '.json';
       document.body.appendChild(a); a.click(); a.remove();
       setTimeout(()=>URL.revokeObjectURL(a.href), 4000);
+      localStorage.setItem('ethrniity-creator-last-export', String(Date.now()));
       if(out) out.textContent = rows.length + ' compte(s) exporté(s).';
     }catch(e){ if(out) out.textContent = 'Erreur : ' + e.message; }
   });
@@ -7892,6 +8391,7 @@ async function initAuthSession(){
     detectCreator();
     ensureFriendCodeRegistered(false);
     refreshChatBadge();
+    fetchAppConfig();
     renderProfil();
   }catch(e){ /* not configured yet, ignore */ }
 }
@@ -8534,10 +9034,10 @@ function leaderboardTabsHtml(active){
   return switcher + '<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">'
     + '<div style="display:flex; gap:6px; flex-wrap:wrap;">'
     + '<button class="btn ' + (active==='progress'?'':'btn-secondary') + '" style="padding:6px 12px; font-size:12px;" onclick="openXPProgressModal()">Ma progression</button>'
-    + '<button class="btn ' + (active==='general'?'':'btn-secondary') + '" style="padding:6px 12px; font-size:12px;" onclick="openLeaderboardModal()">Général</button>'
-    + '<button class="btn ' + (active==='weekly'?'':'btn-secondary') + '" style="padding:6px 12px; font-size:12px;" onclick="openWeeklyChallengeModal()">Défi semaine</button>'
-    + '<button class="btn ' + (active==='friends'?'':'btn-secondary') + '" style="padding:6px 12px; font-size:12px;" onclick="openFriendsModal()">Amis</button>'
-    + '<button class="btn ' + (active==='messages'?'':'btn-secondary') + '" style="padding:6px 12px; font-size:12px; position:relative;" onclick="openMessagesModal()">💬 Messages' + (chatUnreadTotal > 0 ? ' <span style="background:var(--accent); color:#141517; border-radius:10px; padding:0 6px; font-size:10px; font-weight:700;">' + chatUnreadTotal + '</span>' : '') + '</button>'
+    + ((featureOn('league') || creatorMode) ? '<button class="btn ' + (active==='general'?'':'btn-secondary') + '" style="padding:6px 12px; font-size:12px;" onclick="openLeaderboardModal()">Général</button>' : '')
+    + ((featureOn('challenge') || creatorMode) ? '<button class="btn ' + (active==='weekly'?'':'btn-secondary') + '" style="padding:6px 12px; font-size:12px;" onclick="openWeeklyChallengeModal()">Défi semaine</button>' : '')
+    + ((featureOn('friends') || creatorMode) ? '<button class="btn ' + (active==='friends'?'':'btn-secondary') + '" style="padding:6px 12px; font-size:12px;" onclick="openFriendsModal()">Amis</button>' : '')
+    + ((featureOn('chat') || creatorMode) ? '<button class="btn ' + (active==='messages'?'':'btn-secondary') + '" style="padding:6px 12px; font-size:12px; position:relative;" onclick="openMessagesModal()">💬 Messages' + (chatUnreadTotal > 0 ? ' <span style="background:var(--accent); color:#141517; border-radius:10px; padding:0 6px; font-size:10px; font-weight:700;">' + chatUnreadTotal + '</span>' : '') + '</button>' : '')
     + '</div>'
     + '<button class="del-btn" style="font-size:20px;" onclick="closeLeaderboardModal()">✕</button>'
     + '</div>';
@@ -8764,11 +9264,11 @@ function isoWeekNumber(d){
   return Math.ceil((((date-yearStart)/86400000)+1)/7);
 }
 function currentChallengeType(){
-  const wn = isoWeekNumber(new Date());
-  return CHALLENGE_TYPES[wn % CHALLENGE_TYPES.length];
+  return challengeForMonday(new Date(currentWeekStartISO() + 'T12:00:00'));
 }
 
 async function openFriendsModal(){
+  if(featureBlocked('friends')) return;
   const cfg = loadSyncConfig();
   const bg = document.getElementById('leaderboardModalBg');
   const content = document.getElementById('leaderboardModalContent');
@@ -9021,6 +9521,7 @@ async function viewFriendProfile(friendKey){
   }
 }
 async function openLeaderboardModal(){
+  if(featureBlocked('league')) return;
   const cfg = loadSyncConfig();
   const bg = document.getElementById('leaderboardModalBg');
   const content = document.getElementById('leaderboardModalContent');
@@ -9104,7 +9605,7 @@ async function checkAndClaimWeeklyWin(){
   const prevMonday = new Date(thisMonday); prevMonday.setDate(prevMonday.getDate()-7);
   const prevWeekStart = toLocalISO(prevMonday);
   if((data.challengeWins||[]).includes(prevWeekStart)) return;
-  const prevChallenge = CHALLENGE_TYPES[isoWeekNumber(prevMonday) % CHALLENGE_TYPES.length];
+  const prevChallenge = challengeForMonday(prevMonday);
   try{
     const res = await fetch(cfg.url.replace(/\/$/,'') + '/rest/v1/weekly_challenge?group_code=eq.' + encodeURIComponent(cfg.activeLeaderboardCode) + '&week_start=eq.' + prevWeekStart + '&metric_type=eq.' + prevChallenge.key + '&select=*&order=metric_value.desc&limit=1', {
       headers:{ 'apikey': cfg.anonKey, 'Authorization':'Bearer ' + authSession.access_token }
@@ -9121,6 +9622,7 @@ async function checkAndClaimWeeklyWin(){
 }
 
 async function openWeeklyChallengeModal(){
+  if(featureBlocked('challenge')) return;
   const cfg = loadSyncConfig();
   const bg = document.getElementById('leaderboardModalBg');
   const content = document.getElementById('leaderboardModalContent');
@@ -9176,7 +9678,7 @@ function updateChatBubble(){
   const btn = document.getElementById('chatBubbleBtn');
   const cnt = document.getElementById('chatBubbleCount');
   if(!btn || !cnt) return;
-  btn.style.display = authSession ? 'flex' : 'none';
+  btn.style.display = (authSession && (featureOn('chat') || creatorMode)) ? 'flex' : 'none';
   const n = chatUnreadTotal || 0;
   btn.classList.toggle('has-unread', n > 0);
   cnt.style.display = n > 0 ? '' : 'none';
@@ -9236,7 +9738,7 @@ function computeUnread(messages, myKey){
   return byConv;
 }
 async function refreshChatBadge(){
-  if(!authSession){ chatUnreadTotal = 0; updateChatBubble(); return; }
+  if(!authSession || (!featureOn('chat') && !creatorMode)){ chatUnreadTotal = 0; updateChatBubble(); return; }
   updateChatBubble();
   try{
     const msgs = await fetchRecentMessages();
@@ -9255,6 +9757,7 @@ document.addEventListener('visibilitychange', ()=>{ if(!document.hidden) refresh
 
 function stopChatPolling(){ if(chatPollTimer){ clearInterval(chatPollTimer); chatPollTimer = null; } }
 async function openMessagesModal(){
+  if(featureBlocked('chat')) return;
   stopChatPolling(); activeConv = null;
   const content = document.getElementById('leaderboardModalContent');
   document.getElementById('leaderboardModalBg').classList.add('open');
@@ -9381,6 +9884,7 @@ async function refreshThread(forceScroll){
   }
 }
 async function sendMessageRow(conv, body, kind, payload){
+  if(amIBlocked()) throw new Error('messagerie suspendue');
   const activeProfile = getProfilesList().find(pr=>pr.id===ACTIVE_PROFILE_ID);
   const row = {
     sender_key: authSession.user.id,
@@ -9417,6 +9921,7 @@ function buildSharePayload(exoIds, session){
   }).filter(Boolean);
 }
 async function openShareModal(mode, exoId){
+  if(featureBlocked('share')) return;
   if(!authSession){ showToast("Connecte-toi d'abord (Profil → Synchronisation cloud)"); return; }
   const session = getOrCreateTodaySession();
   const ids = mode==='exo' ? [exoId] : (session.activeExercises||[]);
