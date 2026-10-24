@@ -871,6 +871,11 @@
     .logo-text{font-size:26px;}
     nav.tabs{max-width:520px; left:50%; transform:translateX(-50%); border:1px solid var(--border); border-radius:14px; bottom:16px;}
   }
+
+  .creator-badge{ display:inline-block; font-size:10px; font-weight:700; letter-spacing:0.04em; padding:1px 7px; border-radius:10px; color:#241a05; vertical-align:middle;
+    background:linear-gradient(110deg,#c99a2e 20%,#fff1b8 40%,#c99a2e 60%); background-size:220% 100%; animation:creatorShimmer 3.2s linear infinite; }
+  @keyframes creatorShimmer{ 0%{ background-position:200% 0; } 100%{ background-position:-20% 0; } }
+  @media (prefers-reduced-motion: reduce){ .creator-badge{ animation:none; } }
 </style>
 </head>
 <body>
@@ -1627,12 +1632,158 @@ const BUILTIN_THEME_PACKS = {
     decoration: 'threads'
   }
 };
+// ---------- Compte créateur ----------
+// L'email n'est jamais en clair dans le code : seul son empreinte SHA-256 est comparée.
+// Ce contrôle est purement cosmétique/pratique (badge, thème, panneau) : il ne donne AUCUN accès
+// supplémentaire aux données — les droits réels restent ceux des règles RLS de Supabase.
+const CREATOR_EMAIL_HASH = 'cf06d89df1de4cc228c4b67c4156d2bcc3445fec45796a9378b3a5b874e1d897';
+// Identifiants de compte (UUID) affichés avec le badge 👑 chez les autres utilisateurs.
+// Ton UID est visible dans Profil → Outils créateur.
+const CREATOR_USER_IDS = ['4a1e763c-e0fa-403f-baa2-25e995f2a624'];
+let creatorMode = localStorage.getItem('ethrniity-creator-cached') === '1';
+const CREATOR_THEME_PACK = {
+  label: '👑 Créateur',
+  colors: { accent:'#e8c35a', gold:'#f4d98a', green:'#b8923a' },
+  bgOverride: { bg:'#0b0a08', surface:'#14120d', surface2:'#1b1810', surface3:'#241f14', border:'#3a301a', text:'#f3ecd8', textDim:'#a79a78', textFaint:'#6d6347' },
+  pattern: null,
+  decoration: null
+};
+async function sha256Hex(str){
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
+  return [...new Uint8Array(buf)].map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+async function detectCreator(){
+  let isCreator = false;
+  try{
+    if(authSession && authSession.user && authSession.user.email && window.crypto && crypto.subtle){
+      isCreator = (await sha256Hex(authSession.user.email.trim().toLowerCase())) === CREATOR_EMAIL_HASH;
+    }
+  }catch(e){ return; }
+  if(isCreator === creatorMode) return;
+  creatorMode = isCreator;
+  if(isCreator) localStorage.setItem('ethrniity-creator-cached','1'); else localStorage.removeItem('ethrniity-creator-cached');
+  try{ applyCustomColors(); }catch(e){}
+  try{ if(document.getElementById('profileModalContent')) renderProfil(); }catch(e){}
+}
+function isCreatorKey(userId){
+  if(!userId) return false;
+  if(authSession && authSession.user && authSession.user.id===userId && creatorMode) return true;
+  return CREATOR_USER_IDS.indexOf(userId) !== -1;
+}
+function creatorBadgeHtml(userId){
+  return isCreatorKey(userId) ? ' <span class="creator-badge" title="Créateur de l’appli">👑 Créateur</span>' : '';
+}
+
+// ---------- Outils créateur (réservés au compte créateur, limités par les règles RLS) ----------
+function creatorToolsHtml(){
+  const uid = authSession.user.id;
+  const bs = 'width:100%; margin-top:8px;';
+  return '<div class="card" style="border:1px solid var(--gold);">'
+    + '<h2 class="section-title">👑 Outils créateur</h2>'
+    + '<div style="font-size:11px; color:var(--text-faint); margin-bottom:8px; line-height:1.5;">Visibles uniquement avec ton compte. Ils n’ouvrent aucun accès supplémentaire : tout passe par tes droits Supabase habituels.</div>'
+    + '<label>Ton User UID</label>'
+    + '<div style="display:flex; gap:6px;"><div style="flex:1; min-width:0; background:var(--surface-3); border:1px solid var(--border); border-radius:8px; padding:9px 10px; font-size:11px; font-family:monospace; word-break:break-all;">' + escapeHtml(uid) + '</div>'
+    + '<button class="btn btn-secondary" style="padding:6px 10px;" onclick="copyCreatorUid()">Copier</button></div>'
+    + '<div style="font-size:11px; color:var(--text-faint); margin-top:6px; line-height:1.5;">' + (CREATOR_USER_IDS.indexOf(uid) !== -1 ? '✓ Cet UID est déjà dans <code>CREATOR_USER_IDS</code> : ton badge 👑 est visible chez tes amis.' : '⚠️ Cet UID n\u2019est pas dans <code>CREATOR_USER_IDS</code> (index.html) : ton badge n\u2019est visible que chez toi. Ajoute-le pour qu\u2019il apparaisse chez tes amis.') + '</div>'
+    + '<button class="btn btn-secondary" style="' + bs + '" onclick="creatorListAccounts()">👥 Voir tous les comptes</button>'
+    + '<button class="btn btn-secondary" style="' + bs + '" onclick="creatorCleanAllFriendCodes()">🧼 Supprimer les codes amis en double (tous les comptes)</button>'
+    + '<button class="btn btn-secondary" style="' + bs + '" onclick="runCreatorDiagnostics()">🔍 Diagnostic cloud</button>'
+    + '<button class="btn btn-secondary" style="' + bs + '" onclick="creatorCleanFriendCodes()">🔑 Nettoyer mes doublons de code ami</button>'
+    + '<button class="btn btn-secondary" style="' + bs + '" onclick="creatorPruneBackups()">🧹 Purger les vieilles sauvegardes</button>'
+    + '<div id="creatorToolsOutput" style="margin-top:10px; font-size:12px; line-height:1.6; color:var(--text-dim);"></div>'
+    + '</div>';
+}
+function creatorOut(html){ const el = document.getElementById('creatorToolsOutput'); if(el) el.innerHTML = html; }
+function copyCreatorUid(){
+  const uid = authSession.user.id;
+  if(navigator.clipboard && navigator.clipboard.writeText){ navigator.clipboard.writeText(uid).then(()=>showToast("UID copié"), ()=>showToast("Copie impossible")); }
+  else showToast("Copie impossible sur ce navigateur");
+}
+async function runCreatorDiagnostics(){
+  creatorOut('Diagnostic en cours…');
+  const uid = authSession.user.id;
+  const cfg = loadSyncConfig();
+  const h = { apikey:cfg.anonKey, Authorization:'Bearer ' + authSession.access_token };
+  const base = cfg.url.replace(/\/$/,'') + '/rest/v1/';
+  const count = async (path) => {
+    try{
+      const r = await fetch(base + path, { headers:Object.assign({ Prefer:'count=exact', Range:'0-0' }, h) });
+      if(!r.ok) return '⚠️ ' + r.status;
+      const cr = r.headers.get('content-range') || '';
+      return cr.split('/')[1] || '?';
+    }catch(e){ return '⚠️ réseau'; }
+  };
+  const [backups, codes, friendsA, friendsB, msgs, records] = await Promise.all([
+    count('backups?select=sync_key&sync_key=like.' + encodeURIComponent(uid + '%')),
+    count('profile_codes?select=friend_code&sync_key=eq.' + encodeURIComponent(uid)),
+    count('friends?select=requester_key&requester_key=eq.' + encodeURIComponent(uid) + '&status=eq.accepted'),
+    count('friends?select=requester_key&friend_key=eq.' + encodeURIComponent(uid) + '&status=eq.accepted'),
+    count('messages?select=id&or=(' + encodeURIComponent('sender_key.eq.' + uid + ',recipient_key.eq.' + uid) + ')'),
+    count('exercise_records?select=exercise_name&profile_key=eq.' + encodeURIComponent(uid))
+  ]);
+  const friends = (isNaN(parseInt(friendsA)) || isNaN(parseInt(friendsB))) ? '⚠️' : (parseInt(friendsA) + parseInt(friendsB));
+  creatorOut('<b>Sauvegardes :</b> ' + backups + '<br><b>Codes amis enregistrés :</b> ' + codes + (parseInt(codes) > 1 ? ' (doublons — utilise « Nettoyer »)' : '')
+    + '<br><b>Amis acceptés :</b> ' + friends + '<br><b>Messages (envoyés/reçus) :</b> ' + msgs + (String(msgs).startsWith('⚠️') ? ' — table messages absente ?' : '')
+    + '<br><b>Records partagés :</b> ' + records + '<br><b>Email :</b> ' + escapeHtml(authSession.user.email));
+}
+
+async function creatorFetchAllCodes(){
+  const cfg = loadSyncConfig();
+  const r = await fetch(cfg.url.replace(/\/$/,'') + '/rest/v1/profile_codes?select=friend_code,sync_key,name&order=name.asc&limit=1000', { headers:{ apikey:cfg.anonKey, Authorization:'Bearer ' + authSession.access_token } });
+  if(!r.ok) throw new Error('profile_codes ' + r.status);
+  const rows = await r.json();
+  const by = {};
+  rows.forEach(x=>{ (by[x.sync_key] = by[x.sync_key] || []).push(x); });
+  Object.values(by).forEach(list=>list.sort((a,b)=>a.friend_code.localeCompare(b.friend_code)));
+  return by;
+}
+async function creatorListAccounts(){
+  creatorOut('Chargement…');
+  try{
+    const by = await creatorFetchAllCodes();
+    const keys = Object.keys(by);
+    creatorOut('<b>' + keys.length + ' compte(s) avec un code ami</b><br>' + keys.map(k=>{
+      const l = by[k];
+      return escapeHtml(l[0].name || 'Sans nom') + creatorBadgeHtml(k) + ' — ' + l.map(x=>'#' + escapeHtml(x.friend_code)).join(', ') + (l.length>1 ? ' ⚠️' : '');
+    }).join('<br>') + '<div style="font-size:11px; color:var(--text-faint); margin-top:6px;">Tu vois tous les comptes seulement si tes règles « admin » Supabase sont actives ; sinon tu ne vois que ceux que tes règles autorisent.</div>');
+  }catch(e){ creatorOut('Erreur : ' + escapeHtml(e.message)); }
+}
+async function creatorCleanAllFriendCodes(){
+  try{
+    const by = await creatorFetchAllCodes();
+    const dups = Object.keys(by).filter(k=>by[k].length>1);
+    if(!dups.length){ creatorOut('Aucun doublon de code ami.'); return; }
+    customConfirm('Supprimer les codes en double de ' + dups.length + ' compte(s) ? On garde le premier code (ordre alphabétique) de chaque compte.', async ()=>{
+      const cfg = loadSyncConfig();
+      const h = { apikey:cfg.anonKey, Authorization:'Bearer ' + authSession.access_token };
+      let removed = 0, failed = 0;
+      for(const k of dups){
+        const keep = by[k][0].friend_code;
+        const r = await fetch(cfg.url.replace(/\/$/,'') + '/rest/v1/profile_codes?sync_key=eq.' + encodeURIComponent(k) + '&friend_code=neq.' + encodeURIComponent(keep), { method:'DELETE', headers:Object.assign({ Prefer:'return=representation' }, h) });
+        if(r.ok){ removed += (await r.json()).length; } else failed++;
+      }
+      creatorOut(removed + ' doublon(s) supprimé(s)' + (failed ? ', ' + failed + ' compte(s) refusé(s) par Supabase (droits admin manquants)' : '') + '.');
+    });
+  }catch(e){ creatorOut('Erreur : ' + escapeHtml(e.message)); }
+}
+async function creatorCleanFriendCodes(){
+  creatorOut('Nettoyage…');
+  const ok = await ensureFriendCodeRegistered(true);
+  creatorOut(ok ? 'Code ami unifié : <b>#' + myFriendCode() + '</b>. Relance le diagnostic pour vérifier qu’il n’en reste qu’un (si Supabase refuse les suppressions, retire les autres lignes à la main dans profile_codes).' : 'Échec — regarde le message affiché en bas.');
+}
+async function creatorPruneBackups(){
+  creatorOut('Purge…');
+  await pruneOldTimestampedBackups();
+  creatorOut('Purge terminée : on garde les 10 sauvegardes datées les plus récentes + la sauvegarde quotidienne.');
+}
 function loadCustomThemePacks(){
   try{ return JSON.parse(localStorage.getItem('ethrniity-custom-theme-packs') || '{}'); }
   catch(e){ return {}; }
 }
 function allThemePacks(){
-  return Object.assign({}, BUILTIN_THEME_PACKS, loadCustomThemePacks());
+  const base = Object.assign({}, BUILTIN_THEME_PACKS, loadCustomThemePacks());
+  if(creatorMode) base.createur = CREATOR_THEME_PACK;
+  return base;
 }
 function activeThemePackKey(){ return localStorage.getItem('ethrniity-theme-pack') || ''; }
 function selectThemePack(key){
@@ -7256,7 +7407,7 @@ function renderProfil(){
   const activeProfile = getProfilesList().find(pr=>pr.id===ACTIVE_PROFILE_ID);
 
   let html = '<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">'
-    + '<h3 style="font-size:18px;">Profil' + (activeProfile ? ' — ' + escapeHtml(activeProfile.name) : '') + '</h3>'
+    + '<h3 style="font-size:18px;">Profil' + (activeProfile ? ' — ' + escapeHtml(activeProfile.name) : '') + (creatorMode && authSession ? creatorBadgeHtml(authSession.user.id) : '') + '</h3>'
     + '<button class="del-btn" style="font-size:20px;" onclick="closeProfileModal()">✕</button>'
     + '</div>'
     + '<button class="btn btn-secondary" style="width:100%; margin-bottom:14px;" onclick="switchProfile()">⇄ Changer de profil</button>';
@@ -7371,6 +7522,7 @@ function renderProfil(){
     + '<button class="btn btn-secondary" style="width:100%; margin-top:8px;" onclick="joinLeagueFromForm()">+ Rejoindre cette ligue</button>'
     + (authSession ? renderPushNotifSection() : '')
     + '</div>';
+  if(creatorMode && authSession) html += creatorToolsHtml();
 
   el.innerHTML = html;
 }
@@ -7539,6 +7691,7 @@ function getSupabaseClient(){
     supabaseClient.auth.onAuthStateChange((event, session)=>{
       authSession = session;
       if(session) ensureFriendCodeRegistered(false);
+      detectCreator();
       if(ACTIVE_PROFILE_ID && document.getElementById('app-root').style.display === 'block'){
         try{ renderProfil(); }catch(e){ /* profil modal not open/ready, ignore */ }
       }
@@ -7552,6 +7705,7 @@ async function initAuthSession(){
   try{
     const { data: sessData } = await client.auth.getSession();
     authSession = sessData.session;
+    detectCreator();
     ensureFriendCodeRegistered(false);
     renderProfil();
   }catch(e){ /* not configured yet, ignore */ }
@@ -7560,6 +7714,7 @@ async function signOutCloud(){
   const client = getSupabaseClient();
   if(client) await client.auth.signOut();
   authSession = null;
+  creatorMode = false; localStorage.removeItem('ethrniity-creator-cached');
   localStorage.removeItem('ethrniity-active-profile');
   closeProfileModal();
   document.getElementById('app-root').style.display = 'none';
@@ -8140,7 +8295,7 @@ async function openExerciseComparisonModal(exoId){
         html += '<div class="weight-log-row" style="align-items:center;' + (isMe ? ' background:var(--surface-3); border-radius:8px; padding:8px 10px;' : '') + '">'
           + '<span style="width:20px; color:var(--text-faint); font-family:\'SF Mono\',monospace;">' + (i+1) + '</span>'
           + avatarHtml({avatar:row.avatar, name:row.name}, 32)
-          + '<span style="flex:1; margin-left:10px;">' + escapeHtml(row.name) + (isMe ? ' <span style="color:var(--text-faint); font-size:11px;">(toi)</span>' : '') + '</span>'
+          + '<span style="flex:1; margin-left:10px;">' + escapeHtml(row.name) + creatorBadgeHtml(row.profile_key) + (isMe ? ' <span style="color:var(--text-faint); font-size:11px;">(toi)</span>' : '') + '</span>'
           + '<span class="d">' + row.best_weight + ' kg' + (row.best_reps ? ' × ' + row.best_reps : '') + '</span>'
           + '</div>';
       });
@@ -8516,7 +8671,7 @@ async function renderFriendsList(received, sent){
   } else {
     accepted.forEach(r=>{
       const friendKey = r.requester_key===myKey ? r.friend_key : r.requester_key;
-      html += '<div class="weight-log-row" style="cursor:pointer;" onclick="viewFriendProfile(\'' + friendKey + '\')"><span class="d" style="flex:1;">' + escapeHtml(displayFor(friendKey)) + '</span><span style="color:var(--accent); font-size:12px;">Voir →</span></div>';
+      html += '<div class="weight-log-row" style="cursor:pointer;" onclick="viewFriendProfile(\'' + friendKey + '\')"><span class="d" style="flex:1;">' + escapeHtml(displayFor(friendKey)) + creatorBadgeHtml(friendKey) + '</span><span style="color:var(--accent); font-size:12px;">Voir →</span></div>';
     });
   }
   content.innerHTML = html;
@@ -8645,7 +8800,7 @@ async function viewFriendProfile(friendKey){
     let html = leaderboardTabsHtml('friends');
     html += '<div style="display:flex; align-items:center; gap:12px; margin-bottom:14px;">'
       + avatarHtml({avatar:friendProfile.avatar, name:friendProfile.name||'Ami'}, 48)
-      + '<div style="flex:1;"><div style="font-size:16px; font-weight:600;">' + escapeHtml(friendProfile.name||'Ami') + '</div>'
+      + '<div style="flex:1;"><div style="font-size:16px; font-weight:600;">' + escapeHtml(friendProfile.name||'Ami') + creatorBadgeHtml(friendKey) + '</div>'
       + '<div style="font-size:12px; color:var(--text-faint);">Dernière sync : ' + new Date(rows[0].updated_at).toLocaleDateString('fr-FR') + (st.lastDate ? ' · dernière séance le ' + new Date(st.lastDate+"T12:00:00").toLocaleDateString('fr-FR') : '') + '</div></div>'
       + '<button class="btn btn-add" style="padding:8px 12px; font-size:12px;" onclick="openChatWith(\'' + friendKey + '\')">💬 Message</button>'
       + '</div>';
@@ -8719,7 +8874,7 @@ function renderLeaderboardList(rows){
       html += '<div class="weight-log-row" style="align-items:center;' + (isMe ? ' background:var(--surface-3); border-radius:8px; padding:8px 10px;' : '') + '">'
         + '<span style="width:20px; color:var(--text-faint); font-family:\'SF Mono\',monospace;">' + (i+1) + '</span>'
         + avatarHtml({avatar:row.avatar, name:row.name}, 32)
-        + '<span style="flex:1; margin-left:10px;">' + escapeHtml(row.name) + (isMe ? ' <span style="color:var(--text-faint); font-size:11px;">(toi)</span>' : '') + '</span>'
+        + '<span style="flex:1; margin-left:10px;">' + escapeHtml(row.name) + creatorBadgeHtml(row.profile_key) + (isMe ? ' <span style="color:var(--text-faint); font-size:11px;">(toi)</span>' : '') + '</span>'
         + '<span class="rank-gem" style="background:' + tier.color + '; margin-right:6px;"></span>'
         + '<span class="d" style="min-width:70px; text-align:right;">' + row.rank_name + '</span>'
         + '</div>';
@@ -8816,7 +8971,7 @@ async function openWeeklyChallengeModal(){
         html += '<div class="weight-log-row" style="align-items:center;' + (isMe ? ' background:var(--surface-3); border-radius:8px; padding:8px 10px;' : '') + '">'
           + '<span style="width:20px; color:var(--text-faint); font-family:\'SF Mono\',monospace;">' + (i===0?'🥇':i===1?'🥈':i===2?'🥉':(i+1)) + '</span>'
           + avatarHtml({avatar:row.avatar, name:row.name}, 32)
-          + '<span style="flex:1; margin-left:10px;">' + escapeHtml(row.name) + (isMe ? ' <span style="color:var(--text-faint); font-size:11px;">(toi)</span>' : '') + '</span>'
+          + '<span style="flex:1; margin-left:10px;">' + escapeHtml(row.name) + creatorBadgeHtml(row.profile_key) + (isMe ? ' <span style="color:var(--text-faint); font-size:11px;">(toi)</span>' : '') + '</span>'
           + '<span class="d">' + Math.round(row.metric_value).toLocaleString('fr-FR') + ' ' + challenge.unit + '</span>'
           + '</div>';
       });
@@ -8977,7 +9132,7 @@ function renderThreadMessages(msgs){
     const time = new Date(m.created_at).toLocaleString('fr-FR', { day:'numeric', month:'short', hour:'2-digit', minute:'2-digit' });
     return '<div style="display:flex; justify-content:' + (mine?'flex-end':'flex-start') + '; margin-bottom:8px;">'
       + '<div style="max-width:82%; padding:8px 12px; border-radius:12px; background:' + (mine ? 'var(--accent)' : 'var(--surface-3)') + '; color:' + (mine ? '#141517' : 'var(--text)') + ';">'
-      + (!mine && activeConv.type==='group' ? '<div style="font-size:11px; font-weight:700; opacity:0.75; margin-bottom:2px;">' + escapeHtml(m.sender_name || 'Membre') + '</div>' : '')
+      + (!mine && activeConv.type==='group' ? '<div style="font-size:11px; font-weight:700; opacity:0.75; margin-bottom:2px;">' + escapeHtml(m.sender_name || 'Membre') + creatorBadgeHtml(m.sender_key) + '</div>' : '')
       + (m.body ? '<div style="font-size:14px; white-space:pre-wrap; word-break:break-word;">' + escapeHtml(m.body) + '</div>' : '')
       + (m.kind!=='text' ? sharedCardHtml(m, mine) : '')
       + '<div style="font-size:10px; opacity:0.6; margin-top:3px; text-align:right;">' + time + '</div>'
