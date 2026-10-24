@@ -887,6 +887,11 @@
   @keyframes cwCrown{ 0%{ transform:translateY(-40px) scale(0.3); opacity:0; } 100%{ transform:none; opacity:1; } }
   @keyframes cwText{ 0%{ opacity:0; transform:translateY(8px); } 100%{ opacity:1; transform:none; } }
   @keyframes cwSpark{ 0%{ opacity:0; transform:translate(0,0); } 20%{ opacity:1; } 100%{ opacity:0; transform:translate(var(--dx),var(--dy)); } }
+
+  .chat-bubble-btn.has-unread{ color:var(--accent); border-color:var(--accent); animation:bubblePing 2.4s ease-in-out infinite; }
+  .chat-bubble-count{ position:absolute; top:-6px; right:-6px; min-width:16px; height:16px; padding:0 4px; box-sizing:border-box; border-radius:8px; background:var(--accent); color:#141517; font-size:10px; font-weight:700; line-height:16px; text-align:center; }
+  @keyframes bubblePing{ 0%,100%{ box-shadow:0 0 0 0 rgba(var(--accent-rgb),0.45); } 50%{ box-shadow:0 0 0 6px rgba(var(--accent-rgb),0); } }
+  @media (prefers-reduced-motion: reduce){ .chat-bubble-btn.has-unread{ animation:none; } }
 </style>
 </head>
 <body>
@@ -902,6 +907,7 @@
     </div>
     <div class="header-right">
       <div class="rank-badge" id="rankBadge" onclick="openXPProgressModal()" style="cursor:pointer;"></div>
+      <button class="profile-btn chat-bubble-btn" id="chatBubbleBtn" onclick="openMessagesModal()" aria-label="Messages" style="display:none; position:relative; margin-right:8px;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg><span id="chatBubbleCount" class="chat-bubble-count" style="display:none;"></span></button>
       <button class="profile-btn" id="profileBtn" onclick="openProfileModal()" aria-label="Profil"></button>
     </div>
   </div>
@@ -7869,6 +7875,7 @@ function getSupabaseClient(){
       authSession = session;
       if(session) ensureFriendCodeRegistered(false);
       detectCreator();
+      refreshChatBadge();
       if(ACTIVE_PROFILE_ID && document.getElementById('app-root').style.display === 'block'){
         try{ renderProfil(); }catch(e){ /* profil modal not open/ready, ignore */ }
       }
@@ -7884,6 +7891,7 @@ async function initAuthSession(){
     authSession = sessData.session;
     detectCreator();
     ensureFriendCodeRegistered(false);
+    refreshChatBadge();
     renderProfil();
   }catch(e){ /* not configured yet, ignore */ }
 }
@@ -7892,6 +7900,7 @@ async function signOutCloud(){
   if(client) await client.auth.signOut();
   authSession = null;
   creatorMode = false; localStorage.removeItem('ethrniity-creator-cached');
+  chatUnreadTotal = 0; chatBadgeBaselineDone = false; updateChatBubble();
   localStorage.removeItem('ethrniity-active-profile');
   closeProfileModal();
   document.getElementById('app-root').style.display = 'none';
@@ -9162,6 +9171,17 @@ async function openWeeklyChallengeModal(){
 // ---------- Messagerie (privé + groupe de ligue) & partage ----------
 // Requires the Supabase table "messages" (see messages_setup.sql).
 let chatUnreadTotal = 0;
+let chatBadgeBaselineDone = false;
+function updateChatBubble(){
+  const btn = document.getElementById('chatBubbleBtn');
+  const cnt = document.getElementById('chatBubbleCount');
+  if(!btn || !cnt) return;
+  btn.style.display = authSession ? 'flex' : 'none';
+  const n = chatUnreadTotal || 0;
+  btn.classList.toggle('has-unread', n > 0);
+  cnt.style.display = n > 0 ? '' : 'none';
+  cnt.textContent = n > 99 ? '99+' : String(n);
+}
 let chatPollTimer = null;
 let activeConv = null; // {type:'dm'|'group', id, title}
 function chatSeenKey(convId){ return 'ethrniity-chat-seen-' + ACTIVE_PROFILE_ID + '-' + convId; }
@@ -9216,18 +9236,22 @@ function computeUnread(messages, myKey){
   return byConv;
 }
 async function refreshChatBadge(){
-  if(!authSession) return;
+  if(!authSession){ chatUnreadTotal = 0; updateChatBubble(); return; }
+  updateChatBubble();
   try{
     const msgs = await fetchRecentMessages();
     const unread = computeUnread(msgs, authSession.user.id);
     const total = Object.values(unread).reduce((a,b)=>a+b,0);
-    if(total > chatUnreadTotal && chatUnreadTotal !== null && document.getElementById('app-root') && document.getElementById('app-root').style.display==='block'){
+    if(chatBadgeBaselineDone && total > chatUnreadTotal && document.getElementById('app-root') && document.getElementById('app-root').style.display==='block'){
       showToast('💬 ' + (total - chatUnreadTotal) + ' nouveau(x) message(s)');
     }
+    chatBadgeBaselineDone = true;
     chatUnreadTotal = total;
+    updateChatBubble();
   }catch(e){ /* table missing or offline: stay silent */ }
 }
-setInterval(()=>{ if(!document.hidden) refreshChatBadge(); }, 60000);
+setInterval(()=>{ if(!document.hidden) refreshChatBadge(); }, 30000);
+document.addEventListener('visibilitychange', ()=>{ if(!document.hidden) refreshChatBadge(); });
 
 function stopChatPolling(){ if(chatPollTimer){ clearInterval(chatPollTimer); chatPollTimer = null; } }
 async function openMessagesModal(){
@@ -9244,6 +9268,8 @@ async function openMessagesModal(){
     const [friends, msgs] = await Promise.all([getAcceptedFriends(), fetchRecentMessages()]);
     const unread = computeUnread(msgs, myKey);
     chatUnreadTotal = Object.values(unread).reduce((a,b)=>a+b,0);
+    chatBadgeBaselineDone = true;
+    updateChatBubble();
     const lastByConv = {};
     msgs.forEach(m=>{ const id = convIdOfMessage(m, myKey); if(!lastByConv[id]) lastByConv[id] = m; });
     const convs = [{ type:'group', id:'_announcements', title:'📢 Annonces', key:'group:_announcements' }];
