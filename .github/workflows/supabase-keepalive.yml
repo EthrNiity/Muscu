@@ -1,0 +1,78 @@
+# Garde les projets Supabase (offre gratuite) éveillés.
+# Supabase met en pause un projet qui reçoit trop peu de requêtes sur 7 jours.
+# Ce workflow fait une petite requête en base deux fois par jour, sans rien modifier
+# dans les données des applis.
+#   - Séance musculation : Muscu + Coût Réel (même projet)
+#   - Phasmophobia       : Grimoire des Entités
+# Les clés utilisées sont les clés publiques (publishable), déjà présentes dans les applis.
+
+name: Supabase keepalive
+
+on:
+  schedule:
+    - cron: "17 5,17 * * *"   # 06:17 et 18:17 (heure de Paris en hiver)
+  workflow_dispatch:           # bouton « Run workflow » pour un test manuel
+
+permissions:
+  contents: write
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Réveiller les projets Supabase
+        run: |
+          set -u
+          fail=0
+
+          ping() {
+            name="$1"; method="$2"; url="$3"; key="$4"
+            for attempt in 1 2 3; do
+              if [ "$method" = "POST" ]; then
+                code=$(curl -s -o /tmp/body -w "%{http_code}" -m 30 -X POST \
+                  -H "apikey: $key" -H "Content-Type: application/json" -d '{}' "$url")
+              else
+                code=$(curl -s -o /tmp/body -w "%{http_code}" -m 30 \
+                  -H "apikey: $key" "$url")
+              fi
+              if [ "$code" -ge 200 ] && [ "$code" -lt 300 ]; then
+                echo "✅ $name : OK ($code)"
+                return 0
+              fi
+              echo "⚠️ $name : tentative $attempt → HTTP $code"; head -c 300 /tmp/body; echo
+              sleep 20
+            done
+            echo "::error::$name ne répond pas — le projet est peut-être en pause."
+            fail=1
+          }
+
+          # Muscu + Coût Réel (projet « Séance musculation »)
+          ping "Muscu + Coût Réel" GET \
+            "https://iqztehywqhwcvgskeosu.supabase.co/rest/v1/backups?select=user_id&limit=1" \
+            "sb_publishable_ykcPtbs1MDlI2RjYK4WgVw_RfcHTB9a"
+
+          # Grimoire des Entités (projet « Phasmophobia »)
+          ping "Grimoire des Entités" POST \
+            "https://plqpedripvqqgarlbxqp.supabase.co/rest/v1/rpc/keepalive_ping" \
+            "sb_publishable_XcPMMJlM_jrA0WyD9Oxujg_Ui-KRVtF"
+
+          exit $fail
+
+      # GitHub désactive les tâches planifiées d'un dépôt public sans activité depuis 60 jours.
+      # Si le dernier commit date de plus de 45 jours, on met à jour un petit fichier témoin.
+      - uses: actions/checkout@v4
+        if: always()
+      - name: Garder le dépôt actif
+        if: always()
+        run: |
+          last=$(git log -1 --format=%ct)
+          age=$(( ( $(date +%s) - last ) / 86400 ))
+          echo "Dernier commit il y a $age jours"
+          if [ "$age" -ge 45 ]; then
+            mkdir -p .github
+            date -u +"%Y-%m-%dT%H:%M:%SZ" > .github/keepalive.txt
+            git config user.name "github-actions[bot]"
+            git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
+            git add .github/keepalive.txt
+            git commit -m "chore: keepalive" && git push
+          fi
